@@ -41,11 +41,9 @@ from opentui import (
 )
 
 from settings import (
-    DEFAULTS,
     load_settings,
     mask_key,
     reports_dir,
-    settings_path,
     update_settings,
 )
 from ui import theme
@@ -151,9 +149,9 @@ def logo_lines(tick: int) -> list:
     base = accent()
     out = []
     for i, line in enumerate(lines):
-        vertical = 1.12 - 0.24 * (i / total)  # lighter crown, deeper base
+        vertical = 1.20 - 0.40 * (i / total)  # lighter crown, deeper base
         wave = 0.5 + 0.5 * math.sin(tick * 0.30 - i * 0.55)
-        out.append(Text(line, fg=shade(base, vertical * (0.94 + 0.12 * wave))))
+        out.append(Text(line, fg=shade(base, vertical * (0.90 + 0.20 * wave))))
     return out
 
 
@@ -196,7 +194,7 @@ state = {
     "query": "",
     "max_iter": 10,
     "toggles": {},
-    "cursor": 0,
+    "cursors": {},
     "key_field": "",
     "default_field": "",
     "result": None,
@@ -208,6 +206,29 @@ inputs: dict = {}
 renderer_ref: dict = {}
 pump_stop = threading.Event()
 _keyboard_bound: dict = {}
+
+
+def tracked_select(name: str, options: list, **kw) -> SelectRenderable:
+    """Select list with quiet styling and a cursor that survives re-renders.
+
+    The logo ticker re-evaluates the tree several times a second; without a
+    persistent cursor every rebuild would jump back to the top option.
+    """
+    for opt in options:
+        if not opt.name.startswith("  "):
+            opt.name = "  " + opt.name
+    kw.setdefault("selected_background_color", accent())
+    kw.setdefault("selected_text_color", TITLE_FG)
+    kw.setdefault("description_color", SECONDARY)
+    kw.setdefault("item_spacing", 1)
+    sel = SelectRenderable(
+        options=options,
+        selected_index=min(state["cursors"].get(name, 0), max(len(options) - 1, 0)),
+        **kw,
+    )
+    sel.on("selectionChanged", lambda idx, opt: state["cursors"].update({name: idx}))
+    selects[name] = sel
+    return sel
 
 
 # --------------------------------------------------------------------------
@@ -305,17 +326,11 @@ def menu_select() -> SelectRenderable:
         elif value == "quit":
             renderer_ref.get("r") and renderer_ref["r"].stop()
 
-    sel = SelectRenderable(
-        options=[
-            SelectOption("New research", "new", "Answer a question with deep web research"),
-            SelectOption("Settings", "settings", "Theme, reports folder, API keys, defaults"),
-            SelectOption("Quit", "quit", "Exit Veritas"),
-        ],
-        selected_background_color=accent(),
-        selected_text_color=TITLE_FG,
-        item_spacing=1,
-        description_color=SECONDARY,
-    )
+    sel = tracked_select("menu", [
+        SelectOption("New research", "new", "Answer a question with deep web research"),
+        SelectOption("Settings", "settings", "Theme, reports folder, API keys, defaults"),
+        SelectOption("Quit", "quit", "Exit Veritas"),
+    ])
     sel.on("itemSelected", on_pick)
     return sel
 
@@ -335,7 +350,6 @@ def sources_select(session: bool) -> SelectRenderable:
             if not session:
                 update_settings(category_toggles={value: toggles[value]})
                 settings_sig.set(load_settings())
-            state["cursor"] = index
             toggles_sig.set(dict(toggles))
 
     options = []
@@ -347,15 +361,8 @@ def sources_select(session: bool) -> SelectRenderable:
     else:
         options.append(SelectOption("Back", "__back__"))
 
-    sel = SelectRenderable(
-        options=options,
-        selected_index=min(state["cursor"], len(options) - 1),
-        selected_background_color=accent(),
-        selected_text_color=TITLE_FG,
-        item_spacing=1,
-    )
+    sel = tracked_select("sources" if session else "set-sources", options)
     sel.on("itemSelected", on_pick)
-    sel.on("selectionChanged", lambda idx, opt: state.update(cursor=idx))
     return sel
 
 
@@ -377,25 +384,6 @@ def activity_lines() -> list:
         return [Text("Waiting for activity...", fg=SECONDARY)]
     colors = {"err": DANGER, "warn": ACCENTS["amber"], "phase": accent()}
     return [Text(text, fg=colors.get(level, SECONDARY)) for level, text in lines]
-
-
-def settings_summary() -> str:
-    s = settings_sig()
-    active = s.get("category_toggles", {})
-    on = sum(1 for v in active.values() if v)
-    return "\n".join(
-        [
-            f"Theme:            {s.get('theme', '')}",
-            f"Reports folder:   {reports_dir(s)}",
-            f"NVIDIA key:       {mask_key(s.get('nvidia_api_key', ''))}",
-            f"Tavily key:       {mask_key(s.get('tavily_api_key', ''))}",
-            f"Base URL:         {s.get('nvidia_api_base_url', '')}",
-            f"Max iterations:   {s.get('max_iterations', '')}",
-            f"Max results:      {s.get('max_search_results', '')}",
-            f"Sources:          {on}/{len(active)} enabled",
-            f"Settings file:    {settings_path()}",
-        ]
-    )
 
 
 # --------------------------------------------------------------------------
@@ -512,7 +500,7 @@ def App():
             if raw:
                 state["max_iter"] = int(raw)
             state["toggles"] = dict(settings_sig().get("category_toggles", {}))
-            state["cursor"] = 0
+            state["cursors"]["sources"] = 0
             screen.set("sources")
 
         iter_input = Input(
@@ -599,26 +587,19 @@ def App():
                 screen.set(value)
 
         s = settings_sig()
-        sel = SelectRenderable(
-            options=[
-                SelectOption("Color theme", "set-theme", f"Current: {s.get('theme', '')}"),
-                SelectOption("Reports folder", "set-reports", reports_dir(s)),
-                SelectOption("API keys", "set-keys", "NVIDIA + Tavily, stored locally"),
-                SelectOption("Research defaults", "set-defaults", "Iterations + results per search"),
-                SelectOption("Default sources", "set-sources", "Which sites new runs include"),
-                SelectOption("Back", "back"),
-            ],
-            selected_background_color=accent(),
-            selected_text_color=TITLE_FG,
-            item_spacing=1,
-            description_color=SECONDARY,
-        )
+        active = s.get("category_toggles", {})
+        on = sum(1 for v in active.values() if v)
+        sel = tracked_select("settings", [
+            SelectOption("Color theme", "set-theme", f"Current: {s.get('theme', '')}"),
+            SelectOption("Reports folder", "set-reports", reports_dir(s)),
+            SelectOption("API keys", "set-keys", "NVIDIA + Tavily, stored locally"),
+            SelectOption("Research defaults", "set-defaults", "Iterations + results per search"),
+            SelectOption("Default sources", "set-sources", f"{on}/{len(active)} enabled"),
+            SelectOption("Back", "back"),
+        ])
         sel.on("itemSelected", on_pick)
-        selects["settings"] = sel
         return Box(
-            frame("Settings", Text(settings_summary())),
-            gap(),
-            frame("Edit", sel),
+            frame("Settings", sel),
             gap(),
             hint("Up/Down to move, Enter to edit, Esc for menu"),
         )
@@ -629,16 +610,14 @@ def App():
             settings_sig.set(load_settings())
             screen.set("settings")
 
-        sel = SelectRenderable(
-            options=[SelectOption(name, name) for name in theme.THEMES],
-            selected_background_color=accent(),
-            selected_text_color=TITLE_FG,
-            item_spacing=1,
+        sel = tracked_select(
+            "set-theme",
+            [SelectOption(name, name) for name in theme.THEMES],
         )
         sel.on("itemSelected", on_pick)
-        selects["set-theme"] = sel
         return Box(
             frame("Color theme", sel),
+            gap(),
             hint("Enter to apply, Esc to go back"),
         )
 
@@ -692,18 +671,15 @@ def App():
             "tavily_api_key": ("Tavily API key", mask_key(s.get("tavily_api_key", ""))),
             "nvidia_api_base_url": ("Base URL", str(s.get("nvidia_api_base_url", ""))),
         }
-        sel = SelectRenderable(
-            options=[SelectOption(label, key, current) for key, (label, current) in labels.items()]
+        sel = tracked_select(
+            "set-keys",
+            [SelectOption(label, key, current) for key, (label, current) in labels.items()]
             + [SelectOption("Back", "back")],
-            selected_background_color=accent(),
-            selected_text_color=TITLE_FG,
-            item_spacing=1,
-            description_color=SECONDARY,
         )
         sel.on("itemSelected", on_pick)
-        selects["set-keys"] = sel
         return Box(
             frame("API keys", sel),
+            gap(),
             hint("Keys are stored only in your local settings file"),
         )
 
@@ -747,20 +723,17 @@ def App():
                 screen.set("set-default")
 
         s = settings_sig()
-        sel = SelectRenderable(
-            options=[
-                SelectOption("Max iterations", "max_iterations", f"Current: {s.get('max_iterations', '')}"),
-                SelectOption("Max search results", "max_search_results", f"Current: {s.get('max_search_results', '')}"),
-                SelectOption("Back", "back"),
-            ],
-            selected_background_color=accent(),
-            selected_text_color=TITLE_FG,
-            item_spacing=1,
-            description_color=SECONDARY,
-        )
+        sel = tracked_select("set-defaults", [
+            SelectOption("Max iterations", "max_iterations", f"Current: {s.get('max_iterations', '')}"),
+            SelectOption("Max search results", "max_search_results", f"Current: {s.get('max_search_results', '')}"),
+            SelectOption("Back", "back"),
+        ])
         sel.on("itemSelected", on_pick)
-        selects["set-defaults"] = sel
-        return Box(frame("Research defaults", sel))
+        return Box(
+            frame("Research defaults", sel),
+            gap(),
+            hint("Enter to edit, Esc to go back"),
+        )
 
     if current == "set-default":
         field = state["default_field"]
@@ -798,9 +771,9 @@ def App():
 
     if current == "set-sources":
         sel = sources_select(session=False)
-        selects["set-sources"] = sel
         return Box(
             frame("Default sources", sel),
+            gap(),
             hint("Enter toggles a source, Esc to go back"),
         )
 
@@ -812,11 +785,14 @@ def run() -> None:
     pump_stop.clear()
 
     def _ticker() -> None:
+        # The banner shimmer lives only on the menu; ticking elsewhere would
+        # rebuild inputs and selects for nothing (and reset their cursors).
         n = 0
         while not pump_stop.is_set():
             try:
-                tick_sig.set(n)
-                n += 1
+                if screen() == "menu":
+                    tick_sig.set(n)
+                    n += 1
             except Exception:
                 break
             time.sleep(0.15)
