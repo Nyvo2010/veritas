@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "veritas"
+version = "1.0.0"
+description = "Veritas Deep Research Agent - deep, iterative web research with a live terminal UI"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "openai>=1.0.0",
+    "tavily-python>=0.3.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.5.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+    "nest-asyncio>=1.5.0",
+    "rich>=13.0.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["cli", "main", "config", "settings"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+veritas = "cli:main"

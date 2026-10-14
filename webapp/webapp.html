@@ -1,0 +1,1270 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Veritas UI Prototype</title>
+
+    <!-- Fonts: Instrument Serif (for Headings) and Inter (for Helios substitute) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@300;400;500;600&display=swap"
+        rel="stylesheet">
+
+    <!-- Icons: Google Material Symbols Rounded -->
+    <link
+        href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200"
+        rel="stylesheet" />
+
+    <style>
+        /* --- Global Styles --- */
+        :root {
+            --bg-color: #F7F7F8;
+            --sidebar-bg: #FFFFFF;
+            --text-primary: #1A1A1A;
+            --text-secondary: #666666;
+            --text-light: #999999;
+            --accent-blue: #2962FF;
+            --border-color: #C1C1C1;
+
+            --font-serif: 'Instrument Serif', serif;
+            --font-sans: 'Inter', sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html,
+        body {
+            height: 100%;
+        }
+
+        body {
+            font-family: var(--font-sans);
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+            transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        button {
+            font-family: var(--font-sans);
+            cursor: pointer;
+        }
+
+        /* --- SIDEBAR --- */
+        .sidebar {
+            width: 260px;
+            background: var(--sidebar-bg);
+            border-right: 1px solid var(--border-color);
+            position: relative;
+            padding: 16px;
+            padding-top: 64px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            flex-shrink: 0;
+            transition: width 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+                padding 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+                border-width 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .sidebar-top {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow: hidden;
+        }
+
+        .brand-icon {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            position: fixed;
+            left: 24px;
+            top: 28px;
+            z-index: 250;
+            width: 28px;
+        }
+
+        .brand-icon .material-symbols-rounded {
+            font-size: 28px;
+            font-weight: 400;
+        }
+
+        .menu-btn {
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            padding: 4px;
+            border-radius: 6px;
+            position: fixed;
+            left: 212px;
+            top: 24px;
+            z-index: 300;
+            transition: left 0.4s cubic-bezier(0.16, 1, 0.3, 1), background 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .menu-btn:hover {
+            background: #f5f5f5;
+        }
+
+        .menu-btn .material-symbols-rounded {
+            font-size: 28px;
+            color: var(--text-primary);
+        }
+
+        .new-report-btn,
+        .settings-btn {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            background: transparent;
+            border: none;
+            padding: 8px 0;
+            font-size: 15px;
+            color: var(--text-primary);
+            font-weight: 500;
+            text-align: left;
+            white-space: nowrap;
+        }
+
+        .new-report-btn .material-symbols-rounded,
+        .search-trigger .material-symbols-rounded,
+        .settings-btn .material-symbols-rounded {
+            font-weight: 400;
+            flex-shrink: 0;
+        }
+
+        .nav-section {
+            margin-top: 24px;
+            white-space: nowrap;
+        }
+
+        /* Scrollable list for Reports (items only) */
+        .nav-list {
+            overflow-y: auto;
+            /* leave room for top padding and settings button; adjusts to viewport */
+            max-height: calc(100vh - 220px);
+            padding-right: 6px; /* avoid content behind scrollbar */
+        }
+
+        /* Full-width separator above settings (spans sidebar edge-to-edge)
+           Positioned absolutely so it's not affected by sidebar padding. */
+        .nav-separator {
+            position: absolute;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: var(--border-color);
+            bottom: 72px; /* sits above the settings area; adjust if needed */
+        }
+
+        .nav-label {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+            padding: 0;
+        }
+
+        .nav-item {
+            display: block;
+            text-decoration: none;
+            color: var(--text-primary);
+            padding: 8px 0;
+            font-size: 14px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            border-radius: 4px;
+        }
+
+        .nav-item.active {
+            font-weight: 400;
+        }
+
+        .sidebar-bottom {
+            overflow: hidden;
+        }
+
+        /* --- Sidebar Closed State --- */
+        body.sidebar-closed .sidebar {
+            width: 0;
+            padding: 24px 0;
+            padding-top: 76px;
+            border-right-width: 0;
+        }
+
+        body.sidebar-closed .sidebar .new-report-btn span:last-child,
+        body.sidebar-closed .sidebar .search-trigger span:last-child,
+        body.sidebar-closed .sidebar .settings-btn span:last-child,
+        body.sidebar-closed .sidebar .nav-section,
+        body.sidebar-closed .sidebar .sidebar-bottom {
+            display: none;
+            opacity: 0;
+        }
+
+        /* Move button to just after logo when sidebar is closed */
+        body.sidebar-closed .menu-btn {
+            left: 64px;
+        }
+
+        /* --- MAIN LAYOUT --- */
+        main {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+            height: 100%;
+            padding: 40px 32px;
+            overflow-y: auto;
+            transition: justify-content 0.6s ease;
+        }
+
+        main.state-input {
+            justify-content: center;
+        }
+
+        main.state-processing,
+        main.state-report {
+            justify-content: flex-start;
+            padding-top: 80px;
+        }
+
+        /* --- Open Menu Button (removed - using single button now) --- */
+
+        /* --- DYNAMIC HEADER --- */
+        .page-header {
+            text-align: center;
+            /* reduce space below date */
+            margin-bottom: 16px;
+            width: 100%;
+            max-width: 680px;
+            pointer-events: none;
+            z-index: 0;
+            transition: margin 0.6s ease, opacity 0.6s ease, font-size 0.6s ease, text-align 0.6s ease;
+        }
+
+        .page-header h1 {
+            font-family: var(--font-serif);
+            font-size: 64px;
+            font-weight: 400;
+            color: #000;
+            margin-bottom: 0;
+            line-height: 1;
+            transition: font-size 0.6s ease, color 0.6s ease;
+        }
+
+        .page-header #header-subtext {
+            font-size: 14px;
+            color: var(--text-secondary);
+            opacity: 0;
+            margin-top: 12px;
+            transition: opacity 0.4s;
+        }
+
+        /* Header styling for Processing State */
+        main.state-processing .page-header {
+            text-align: left;
+        }
+
+        main.state-processing #header-text {
+            font-size: 48px;
+            color: var(--text-secondary);
+            line-height: 1.1;
+        }
+
+        main.state-processing #header-subtext {
+            opacity: 1;
+        }
+
+        /* Header styling for Report State */
+        main.state-report .page-header {
+            text-align: left;
+        }
+
+        main.state-report #header-text {
+            font-size: 48px;
+            color: var(--text-secondary);
+            line-height: 1.1;
+        }
+
+        main.state-report #header-subtext {
+            opacity: 1;
+        }
+
+        /* --- CARD CONTAINER --- */
+        .card-container {
+            position: relative;
+            width: 680px;
+            z-index: 10;
+        }
+
+        /* --- SHARED CARD STYLES --- */
+        .card {
+            background: #FFFFFF;
+            border-radius: 16px;
+            width: 100%;
+            border: 1px solid var(--border-color);
+            position: absolute;
+            top: 0;
+            left: 0;
+            opacity: 0;
+            pointer-events: none;
+            transform: scale(0.95);
+            transition: opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1),
+                transform 0.5s cubic-bezier(0.16, 1, 0.3, 1),
+                border-radius 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .card.active {
+            opacity: 1;
+            pointer-events: auto;
+            position: relative;
+            transform: scale(1);
+        }
+
+        /* --- INPUT CARD --- */
+        .input-card {
+            padding: 16px;
+            min-height: 120px;
+            /* slightly smaller shadow and nudged down */
+            box-shadow: 0 10px 10px -6px rgba(0, 0, 0, 0.28);
+        }
+
+        .input-card-content {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            height: 100%;
+        }
+
+        #query-input {
+            width: 100%;
+            border: none;
+            outline: none;
+            font-family: var(--font-sans);
+            font-size: 15px;
+            line-height: 1.5;
+            background: transparent;
+            padding: 6px 0;
+            resize: none;
+            overflow-y: auto;
+            /* larger input area */
+            min-height: 60px;
+            max-height: 200px;
+        }
+
+        #query-input::placeholder {
+            color: var(--text-light);
+        }
+
+        .input-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            width: 100%;
+            margin-top: auto;
+        }
+
+        .icon-btn {
+            background: none;
+            border: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            color: var(--text-primary);
+            padding: 0 10px;
+            height: 40px;
+            /* match send-btn height */
+            min-width: 40px;
+            border-radius: 8px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+
+        .icon-btn .material-symbols-rounded {
+            font-size: 20px;
+            /* larger icons */
+            line-height: 1;
+        }
+
+        .icon-btn .arrow {
+            font-size: 16px;
+            line-height: 1;
+        }
+
+        .icon-btn:hover {
+            background: #f5f5f5;
+        }
+
+        .send-btn {
+            background: var(--accent-blue);
+            color: white;
+            border: none;
+            width: 40px;
+            height: 40px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .send-btn:hover {
+            opacity: 0.9;
+        }
+
+        .send-btn .material-symbols-rounded {
+            font-size: 20px;
+        }
+
+        /* Filter Popup */
+        .filter-wrapper {
+            position: relative;
+        }
+
+        /* Row to hold multiple filter buttons side-by-side */
+        .filters-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .filter-popup {
+            position: absolute;
+            bottom: calc(100% + 8px);
+            left: 0;
+            background: white;
+            border-radius: 12px;
+            /* slightly smaller shadow and nudged down */
+            box-shadow: 0 8px 8px -6px rgba(0, 0, 0, 0.24);
+            padding: 6px;
+            width: 200px;
+            display: none;
+            border: 1px solid var(--border-color);
+            z-index: 100;
+        }
+
+        .filter-popup.show {
+            display: flex;
+            flex-direction: column;
+            animation: popupFadeIn 0.2s ease-out;
+        }
+
+        /* Sidebar button styles: reuse `icon-btn` appearance for menu items */
+        .sidebar .icon-btn {
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            gap: 10px;
+            background: transparent;
+            border: none;
+            padding: 6px 8px;
+            font-size: 15px;
+            color: var(--text-primary);
+            text-align: left;
+            width: 100%;
+            border-radius: 8px;
+            box-sizing: border-box;
+        }
+
+        .sidebar .icon-btn:hover {
+            background: #f5f5f5;
+        }
+
+        /* Ensure nav items (report links) are left-aligned and same size */
+        .sidebar .nav-item {
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            gap: 10px;
+            font-size: 15px;
+            padding: 6px 8px;
+            color: var(--text-primary);
+            text-decoration: none;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            box-sizing: border-box;
+            border-radius: 8px;
+        }
+
+        .sidebar .nav-item:hover {
+            background: #f5f5f5;
+        }
+
+        /* Ensure non-button menu text (section labels) match buttons' size and padding */
+        .sidebar .nav-label {
+            font-size: 15px;
+            padding: 6px 8px;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+            box-sizing: border-box;
+        }
+
+        /* small spacing tweak for New Report to move it down slightly */
+        .new-report-btn {
+            margin-top: 12px;
+            font-size: 15px;
+        }
+
+        @keyframes popupFadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(5px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .checkbox-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 10px;
+            font-size: 14px;
+            color: var(--text-primary);
+            cursor: pointer;
+            border-radius: 6px;
+        }
+
+        .checkbox-row:hover {
+            background: #f5f5f5;
+        }
+
+        .checkbox-row .material-symbols-rounded {
+            font-size: 18px;
+            margin-right: 8px;
+            color: var(--text-secondary);
+            font-weight: 400;
+        }
+
+        .checkbox-row input[type="checkbox"] {
+            accent-color: var(--accent-blue);
+            width: 16px;
+            height: 16px;
+        }
+
+        .checkbox-row label {
+            display: flex;
+            align-items: center;
+            flex: 1;
+            cursor: pointer;
+        }
+
+        /* --- PROCESSING CARD --- */
+        .processing-card {
+            padding: 16px;
+            /* adapt height to contents */
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            /* slightly smaller shadow and nudged down */
+            box-shadow: 0 8px 8px -6px rgba(0, 0, 0, 0.24);
+        }
+
+        .progress-header {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 6px;
+            margin: 0;
+        }
+
+        .progress-header h2 {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .progress-subheader {
+            display: flex;
+            justify-content: space-between;
+            width: 100%;
+            align-items: baseline;
+        }
+
+        #timer {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        #percentage {
+            font-size: 13px;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        /* Row that contains the progress track */
+        .progress-row {
+            width: 100%;
+        }
+
+        .progress-track {
+            background: #EAF0FF;
+            height: 12px;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            width: 0%;
+            background: var(--accent-blue);
+            border-radius: 6px;
+            transition: width 0.3s linear;
+        }
+
+        /* --- VIEW STEPS (Outside box) --- */
+        .view-steps-section {
+            margin-top: 16px;
+            width: 100%;
+            max-width: 680px;
+        }
+
+        .accordion-trigger {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 14px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-weight: 400;
+            background: none;
+            border: none;
+            padding: 8px 0;
+        }
+
+        .accordion-trigger .material-symbols-rounded {
+            font-size: 18px;
+            transition: transform 0.3s ease;
+        }
+
+        .accordion-trigger.expanded .material-symbols-rounded {
+            transform: rotate(180deg);
+        }
+
+        .reasoning-feed {
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.6;
+            border-left: 2px solid var(--border-color);
+            padding-left: 12px;
+            margin-top: 8px;
+            max-height: 0;
+            overflow: hidden;
+            opacity: 0;
+            transition: max-height 0.4s ease, opacity 0.3s ease, margin-top 0.3s ease;
+        }
+
+        .reasoning-feed.expanded {
+            max-height: 300px;
+            opacity: 1;
+            overflow-y: auto;
+            margin-top: 12px;
+        }
+
+        /* --- REPORT CARD --- */
+        .report-card {
+            padding: 16px;
+            max-height: 85vh;
+            overflow: hidden;
+            /* slightly smaller shadow and nudged down */
+            box-shadow: 0 12px 10px -8px rgba(0, 0, 0, 0.26);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .report-branding {
+            padding: 16px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--text-secondary);
+        }
+
+        .report-branding .logo-small {
+            font-size: 22px;
+            font-weight: 400;
+        }
+
+        .report-branding .brand-name {
+            font-family: var(--font-serif);
+            font-size: 18px;
+            color: var(--text-secondary);
+        }
+
+        .report-title {
+            font-family: var(--font-sans);
+            font-weight: 600;
+            font-size: 28px;
+            padding: 0 16px;
+            margin-bottom: 24px;
+            line-height: 1.3;
+            letter-spacing: -0.01em;
+            color: #000;
+        }
+
+        .report-body {
+            flex-grow: 1;
+            overflow-y: auto;
+            padding: 0 16px;
+            font-size: 15px;
+            line-height: 1.6;
+            color: var(--text-primary);
+            padding-bottom: 40px;
+        }
+
+        .report-body h3 {
+            font-family: var(--font-sans);
+            font-size: 14px;
+            font-weight: 600;
+            margin-top: 24px;
+            margin-bottom: 10px;
+            color: #000;
+        }
+
+        .report-body p {
+            margin-bottom: 16px;
+            color: var(--text-primary);
+            font-size: 15px;
+        }
+
+        .report-footer {
+            padding: 14px 16px;
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            background: #FFFFFF;
+            flex-shrink: 0;
+        }
+
+        .footer-btn {
+            background: none;
+            border: none;
+            font-size: 14px;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 8px;
+            border-radius: 6px;
+        }
+
+        .footer-btn:hover {
+            color: var(--text-primary);
+            background-color: #f5f5f5;
+        }
+
+        .footer-btn .material-symbols-rounded {
+            font-size: 18px;
+        }
+
+        /* Export button placed outside the report card (hidden by default).
+           Styled to match the filter/icon button (no background). */
+        .export-outside {
+            display: none;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 6px;
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 14px;
+            cursor: pointer;
+            align-self: flex-start;
+            /* reduced spacing above/below export */
+            margin: 4px 0 8px 0;
+        }
+
+        /* Container to align export button with the report/card width */
+        .card-align {
+            width: 680px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: flex-start;
+        }
+    </style>
+</head>
+
+<body class="state-input">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <div class="sidebar-top">
+            <div class="brand-icon">
+                <span class="material-symbols-rounded">auto_stories</span>
+                <button class="menu-btn" id="menu-close-btn">
+                    <span class="material-symbols-rounded">menu_open</span>
+                </button>
+            </div>
+
+            <button class="new-report-btn icon-btn">
+                <span class="material-symbols-rounded">add</span> <span>New Report</span>
+            </button>
+
+            <div class="nav-section">
+                <div class="nav-label">Reports</div>
+                <div class="nav-list">
+                    <a href="#" class="nav-item icon-btn">About Plato</a>
+                    <a href="#" class="nav-item icon-btn">Information about Veritas AI</a>
+                    <a href="#" class="nav-item icon-btn active">The Impact of LLMs on th...</a>
+                    <a href="#" class="nav-item icon-btn">Research: AI and Productivity</a>
+                    <a href="#" class="nav-item icon-btn">Study: Social Media Effects</a>
+                    <a href="#" class="nav-item icon-btn">Whitepaper: Ethics in AI</a>
+                    <a href="#" class="nav-item icon-btn">Notes: Model Robustness</a>
+                    <a href="#" class="nav-item icon-btn">Overview: Data Privacy</a>
+                    <a href="#" class="nav-item icon-btn">Draft: Public Perception</a>
+                    <a href="#" class="nav-item icon-btn">Archive: 2024 Reports</a>
+                </div>
+            </div>
+        </div>
+
+        <div class="nav-separator" aria-hidden="true"></div>
+
+        <div class="sidebar-bottom">
+            <button class="settings-btn icon-btn">
+                <span class="material-symbols-rounded">settings</span> <span>Settings</span>
+            </button>
+        </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main id="main-content" class="state-input">
+
+
+        <!-- Dynamic Header -->
+        <div id="page-header" class="page-header">
+            <h1 id="header-text">Veritas</h1>
+            <div id="header-subtext">Monday, January 1st 2025</div>
+        </div>
+
+        <!-- Export button (outside the white report card). Shown only when report is ready -->
+        <div class="card-align">
+            <button class="icon-btn export-outside" id="export-btn" aria-hidden="true">
+                <span class="material-symbols-rounded">export_notes</span>
+                <span>Export</span>
+            </button>
+            <button class="icon-btn export-outside" id="copy-btn" aria-hidden="true">
+                <span class="material-symbols-rounded">content_copy</span>
+                <span>Copy</span>
+            </button>
+        </div>
+
+        <!-- Card Container -->
+        <div class="card-container">
+            <!-- INPUT CARD -->
+            <div class="card input-card active" id="input-card">
+                <div class="input-card-content">
+                    <textarea placeholder="Ask anything..." id="query-input" rows="1"></textarea>
+
+                    <div class="input-controls">
+                        <div class="filters-row">
+                            <div class="filter-wrapper">
+                                <button class="icon-btn" id="filter-btn">
+                                    <span class="material-symbols-rounded">travel_explore</span>
+                                    <span class="material-symbols-rounded arrow">expand_more</span>
+                                </button>
+
+                                <!-- Popup -->
+                                <div class="filter-popup" id="filter-popup">
+                                    <label class="checkbox-row">
+                                        <div style="display: flex; align-items: center; flex: 1;">
+                                            <span class="material-symbols-rounded">group</span>
+                                            <span>Discussions</span>
+                                        </div>
+                                        <input type="checkbox">
+                                    </label>
+                                    <label class="checkbox-row">
+                                        <div style="display: flex; align-items: center; flex: 1;">
+                                            <span class="material-symbols-rounded">school</span>
+                                            <span>Academic</span>
+                                        </div>
+                                        <input type="checkbox" checked>
+                                    </label>
+                                    <label class="checkbox-row">
+                                        <div style="display: flex; align-items: center; flex: 1;">
+                                            <span class="material-symbols-rounded">newspaper</span>
+                                            <span>News</span>
+                                        </div>
+                                        <input type="checkbox" checked>
+                                    </label>
+                                    <label class="checkbox-row">
+                                        <div style="display: flex; align-items: center; flex: 1;">
+                                            <span class="material-symbols-rounded">hub</span>
+                                            <span>Open knowledge</span>
+                                        </div>
+                                        <input type="checkbox">
+                                    </label>
+                                </div>
+                            </div>
+
+                            <!-- Duplicated filter button to the right (Low / Medium / High) -->
+                            <div class="filter-wrapper">
+                                <button class="icon-btn" id="priority-filter-btn">
+                                    <span class="material-symbols-rounded icon">signal_cellular_3_bar</span>
+                                    <span class="material-symbols-rounded arrow">expand_more</span>
+                                </button>
+
+                                <!-- Popup for priority levels -->
+                                <div class="filter-popup" id="priority-filter-popup">
+                                    <label class="checkbox-row">
+                                        <div style="display: flex; align-items: center; flex: 1;">
+                                            <span class="material-symbols-rounded">signal_cellular_1_bar</span>
+                                            <span>Low</span>
+                                        </div>
+                                        <input type="checkbox" data-icon="signal_cellular_1_bar">
+                                    </label>
+                                    <label class="checkbox-row">
+                                        <div style="display: flex; align-items: center; flex: 1;">
+                                            <span class="material-symbols-rounded">signal_cellular_3_bar</span>
+                                            <span>Medium</span>
+                                        </div>
+                                        <input type="checkbox" data-icon="signal_cellular_3_bar" checked>
+                                    </label>
+                                    <label class="checkbox-row">
+                                        <div style="display: flex; align-items: center; flex: 1;">
+                                            <span class="material-symbols-rounded">signal_cellular_4_bar</span>
+                                            <span>High</span>
+                                        </div>
+                                        <input type="checkbox" data-icon="signal_cellular_4_bar">
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <button class="send-btn" id="send-btn">
+                            <span class="material-symbols-rounded">arrow_upward</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PROCESSING CARD -->
+            <div class="card processing-card" id="processing-card">
+                <div class="progress-header">
+                    <h2>Progress</h2>
+                    <div class="progress-subheader">
+                        <span id="timer">Less than a minute remaining</span>
+                        <span id="percentage">0%</span>
+                    </div>
+                </div>
+
+                <div class="progress-row">
+                    <div class="progress-track">
+                        <div class="progress-fill" id="progress-fill"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- REPORT CARD -->
+            <div class="card report-card" id="report-card">
+                <div class="report-branding">
+                    <span class="material-symbols-rounded logo-small">auto_stories</span>
+                    <span class="brand-name">Veritas</span>
+                </div>
+
+                <h1 class="report-title">The Impact of LLMs on the Society</h1>
+
+                <div class="report-body">
+                    <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Etiam elementum metus at aliquet
+                        efficitur. Etiam imperdiet porttitor libero vel fringilla. Donec maximus diam tristique, feugiat
+                        ligula sit amet, tristique mi. Sed interdum nibh quis finibus blandit. Proin at dignissim orci.
+                    </p>
+
+                    <h3>Origin of LLM's</h3>
+                    <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Etiam elementum metus at aliquet
+                        efficitur. Etiam imperdiet porttitor libero vel fringilla. Donec maximus diam tristique, feugiat
+                        ligula sit amet, tristique mi. Sed interdum nibh quis finibus blandit. Proin at dignissim orci.
+                        Duis sit amet lacus nibh. Praesent fringilla ultrices eros, quis sollicitudin orci tristique
+                        vel.</p>
+
+                    <h3>Use Cases</h3>
+                    <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Etiam elementum metus at aliquet
+                        efficitur. Etiam imperdiet porttitor libero vel fringilla. Donec maximus diam tristique, feugiat
+                        ligula sit amet, tristique mi. Sed interdum nibh quis finibus blandit. Proin at dignissim orci.
+                        Duis sit amet lacus nibh. Praesent fringilla ultrices eros, quis sollicitudin orci tristique
+                        vel. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Etiam elementum metus at aliquet
+                        efficitur. Etiam imperdiet porttitor libero vel fringilla. Donec maximus diam tristique, feugiat
+                        ligula sit amet, tristique mi. Sed interdum nibh quis finibus blandit. Proin at dignissim orci.
+                        Duis sit amet lacus nibh. Praesent fringilla ultrices eros, quis sollicitudin orci tristique
+                        vel. Sed malesuada ex ipsum, non tempor lacus vulputate non. Nam nibh erat, feugiat ultricies
+                        massa sed, accumsan eleifend velit.</p>
+                </div>
+
+                <!-- Footer (export button moved outside of this white box) -->
+                <div class="report-footer">
+                </div>
+            </div>
+        </div>
+
+        <!-- View Steps Section (Outside the cards) -->
+        <div class="view-steps-section" id="view-steps-section" style="display: none;">
+            <button class="accordion-trigger" id="accordion-trigger">
+                View steps <span class="material-symbols-rounded">expand_more</span>
+            </button>
+            <div class="reasoning-feed" id="reasoning-feed">
+                Lorem ipsum dolor sit amet, consectetur adipiscing elit. Etiam elementum metus at aliquet efficitur.
+                Etiam imperdiet porttitor libero vel fringilla. Donec maximus diam tristique, feugiat ligula sit
+                amet, tristique mi. Sed interdum nibh quis finibus blandit. Proin at dignissim orci. Duis sit amet
+                lacus nibh. Praesent fringilla ultrices eros, quis sollicitudin orci tristique vel.
+            </div>
+        </div>
+    </main>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const body = document.body;
+            const main = document.getElementById('main-content');
+            const menuCloseBtn = document.getElementById('menu-close-btn');
+            const menuOpenBtn = document.getElementById('menu-open-btn');
+            const filterBtn = document.getElementById('filter-btn');
+            const filterPopup = document.getElementById('filter-popup');
+            const priorityFilterBtn = document.getElementById('priority-filter-btn');
+            const priorityFilterPopup = document.getElementById('priority-filter-popup');
+            const sendBtn = document.getElementById('send-btn');
+            const queryInput = document.getElementById('query-input');
+
+            const cards = {
+                input: document.getElementById('input-card'),
+                processing: document.getElementById('processing-card'),
+                report: document.getElementById('report-card')
+            };
+
+            const headerText = document.getElementById('header-text');
+            const progressFill = document.getElementById('progress-fill');
+            const percentageLabel = document.getElementById('percentage');
+            const exportBtn = document.getElementById('export-btn');
+            const copyBtn = document.getElementById('copy-btn');
+            const viewStepsSection = document.getElementById('view-steps-section');
+            const accordionTrigger = document.getElementById('accordion-trigger');
+            const reasoningFeed = document.getElementById('reasoning-feed');
+
+            let currentState = 'input';
+
+            // Sidebar Toggle with delayed button animation
+            menuCloseBtn.addEventListener('click', () => {
+                const isClosing = !body.classList.contains('sidebar-closed');
+
+                if (isClosing) {
+                    // Closing: button moves immediately with menu
+                    body.classList.add('sidebar-closed');
+                } else {
+                    // Opening: wait for menu to partially open before moving button
+                    body.classList.remove('sidebar-closed');
+                    // The CSS transition will handle the timing
+                }
+            });
+
+            // Filter Popup
+            filterBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                filterPopup.classList.toggle('show');
+            });
+
+            // Priority Filter Popup (duplicate to the right)
+            priorityFilterBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                priorityFilterPopup.classList.toggle('show');
+            });
+
+            // Clicking outside closes both popups
+            document.addEventListener('click', () => {
+                if (filterPopup) filterPopup.classList.remove('show');
+                if (priorityFilterPopup) priorityFilterPopup.classList.remove('show');
+            });
+
+            if (filterPopup) filterPopup.addEventListener('click', (e) => e.stopPropagation());
+            if (priorityFilterPopup) priorityFilterPopup.addEventListener('click', (e) => e.stopPropagation());
+
+            // Priority selection logic: only one checkbox selected at a time,
+            // update the priority button icon to match the selected item.
+            if (priorityFilterPopup) {
+                const priorityInputs = Array.from(priorityFilterPopup.querySelectorAll('input[type="checkbox"]'));
+
+                function setPriority(iconName) {
+                    const iconSpan = priorityFilterBtn.querySelector('span.icon');
+                    if (iconSpan) iconSpan.textContent = iconName;
+                }
+
+                // initialize from checked input (default: medium)
+                const initiallyChecked = priorityInputs.find(i => i.checked) || priorityInputs[1];
+                if (initiallyChecked) {
+                    // ensure only one checked
+                    priorityInputs.forEach(i => i.checked = false);
+                    initiallyChecked.checked = true;
+                    setPriority(initiallyChecked.dataset.icon);
+                }
+
+                priorityInputs.forEach((inp) => {
+                    const label = inp.closest('label');
+                    if (!label) return;
+                    label.addEventListener('click', (ev) => {
+                        ev.preventDefault();
+                        // uncheck others
+                        priorityInputs.forEach(i => i.checked = false);
+                        inp.checked = true;
+                        setPriority(inp.dataset.icon);
+                        // close popup after selection
+                        priorityFilterPopup.classList.remove('show');
+                    });
+                });
+            }
+
+            // Accordion Toggle
+            accordionTrigger.addEventListener('click', () => {
+                accordionTrigger.classList.toggle('expanded');
+                reasoningFeed.classList.toggle('expanded');
+            });
+
+            // Auto-resize textarea
+            const autoResizeTextarea = (el) => {
+                el.style.height = 'auto';
+                const newHeight = Math.min(el.scrollHeight, 200);
+                el.style.height = newHeight + 'px';
+            };
+
+            queryInput.addEventListener('input', () => {
+                autoResizeTextarea(queryInput);
+            });
+
+            // Start Processing
+            const startProcessing = () => {
+                const query = queryInput.value.trim();
+                const queryToDisplay = query || "Do research on the impact of LLM's on the society";
+
+                headerText.innerHTML = `&ldquo;${queryToDisplay}&rdquo;`;
+
+                switchState('processing');
+
+                let progress = 0;
+                const interval = setInterval(() => {
+                    progress += Math.floor(Math.random() * 5) + 2;
+                    if (progress > 100) progress = 100;
+
+                    progressFill.style.width = `${progress}%`;
+                    percentageLabel.innerText = `${progress}%`;
+
+                    if (progress === 100) {
+                        clearInterval(interval);
+                        setTimeout(() => {
+                            finishReport();
+                        }, 600);
+                    }
+                }, 100);
+            };
+
+            // Finish Report
+            const finishReport = () => {
+                switchState('report');
+            };
+
+            // State Switching
+            const switchState = (newState) => {
+                if (newState === currentState) return;
+
+                // Update main class
+                main.classList.remove(`state-${currentState}`);
+                main.classList.add(`state-${newState}`);
+
+                // Hide current card
+                if (cards[currentState]) {
+                    cards[currentState].classList.remove('active');
+                }
+
+                // Show new card with delay for morphing animation
+                setTimeout(() => {
+                    if (cards[newState]) {
+                        cards[newState].classList.add('active');
+                    }
+                }, 150);
+
+                // Show/hide view steps section
+                if (newState === 'processing' || newState === 'report') {
+                    viewStepsSection.style.display = 'block';
+                } else {
+                    viewStepsSection.style.display = 'none';
+                    accordionTrigger.classList.remove('expanded');
+                    reasoningFeed.classList.remove('expanded');
+                }
+
+                // Show export + copy buttons only when report is finished
+                if (exportBtn) {
+                    if (newState === 'report') {
+                        exportBtn.style.display = 'flex';
+                        exportBtn.setAttribute('aria-hidden', 'false');
+                    } else {
+                        exportBtn.style.display = 'none';
+                        exportBtn.setAttribute('aria-hidden', 'true');
+                    }
+                }
+
+                if (copyBtn) {
+                    if (newState === 'report') {
+                        copyBtn.style.display = 'flex';
+                        copyBtn.setAttribute('aria-hidden', 'false');
+                    } else {
+                        copyBtn.style.display = 'none';
+                        copyBtn.setAttribute('aria-hidden', 'true');
+                    }
+                }
+
+                currentState = newState;
+            };
+
+            // Event Listeners
+            sendBtn.addEventListener('click', startProcessing);
+            queryInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    startProcessing();
+                }
+            });
+
+            // Copy button behavior: copy report body text to clipboard
+            if (copyBtn) {
+                copyBtn.addEventListener('click', () => {
+                    const reportBody = document.querySelector('.report-body');
+                    const text = reportBody ? reportBody.innerText : '';
+                    if (!text) return;
+
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(text).then(() => {
+                            const original = copyBtn.innerHTML;
+                            copyBtn.innerHTML = '<span class="material-symbols-rounded">check</span><span>Copied</span>';
+                            setTimeout(() => {
+                                copyBtn.innerHTML = original;
+                            }, 1400);
+                        }).catch(() => {
+                            // fallback — do nothing
+                        });
+                    }
+                });
+            }
+
+            // Pre-fill text
+            queryInput.value = "Do research on the impact of LLM's on the society";
+            autoResizeTextarea(queryInput);
+        });
+    </script>
+</body>
+
+</html>
