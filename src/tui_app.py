@@ -321,6 +321,7 @@ state = {
     "default_field": "",
     "result": None,
     "run_start": 0.0,
+    "research_stop": False,
 }
 
 selects: dict = {}
@@ -448,7 +449,12 @@ def worker(query: str, max_iter: int, toggles: dict) -> None:
         }
     except Exception as e:  # noqa: BLE001 - surfaced on the done screen
         state["result"] = {"ok": False, "error": str(e)}
-    screen.set("done")
+    except Exception as e:
+        # Research was cancelled
+        state["result"] = {"ok": False, "error": "Research cancelled"}
+    finally:
+        if not state["research_stop"]:
+            screen.set("done")
 
 
 def start_run() -> None:
@@ -1291,10 +1297,16 @@ def run() -> None:
     try:
         current_settings = load_settings()
         nvidia_key, tavily_key, _ = resolve_api_keys(current_settings)
-        screen.set("setup-welcome" if not (nvidia_key and tavily_key) else "menu")
+        has_keys = nvidia_key and tavily_key
     except Exception:
-        screen.set("menu")
-
+        has_keys = False
+    
+    # Show alert if no API keys are configured
+    if not has_keys:
+        err_sig.set("Configure API keys in Settings or via environment variables to start research.")
+    
+    screen.set("setup-welcome" if not has_keys else "menu")
+    
     def _ticker() -> None:
         # The banner shimmer lives only on the menu; ticking elsewhere would
         # rebuild inputs and selects for nothing (and reset their cursors).
@@ -1313,6 +1325,10 @@ def run() -> None:
         # use_mouse=False: nothing here clicks; mouse tracking left on is
         # exactly what leaks escape garbage into the shell after exit.
         asyncio.run(render(App, {"use_mouse": False}))
+    except KeyboardInterrupt:
+        # User pressed Ctrl+C - request research cancellation
+        state["research_stop"] = True
+        pump_stop.set()
     finally:
         pump_stop.set()
         _reset_terminal()
