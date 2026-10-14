@@ -584,11 +584,18 @@ def model_screen(name: str, title: str, base_url: str, api_key: str,
 
 
 def progress_bar() -> str:
+    """Progress bar with pulsing activity indicator; shown at bottom of run screen."""
     completed, total, _ = prog_sig()
     ratio = min(1.0, completed / total) if total else 0.0
     width = 36
     filled = int(width * ratio)
-    return "█" * filled + "░" * (width - filled) + f" {ratio * 100:.0f}%"
+    # Pulsing last block: use spin_sig() % 2 to toggle each tick
+    if filled > 0 and filled < width:
+        pulse = "▏" if spin_sig() % 2 == 0 else "▎"
+        bar = "█" * (filled - 1) + pulse
+    else:
+        bar = "█" * filled + "░" * (width - filled)
+    return bar + f" {ratio * 100:.0f}%"
 
 
 def activity_lines() -> list:
@@ -753,20 +760,38 @@ def App():
         )
 
     if current == "run":
-        frames = theme.SPINNER_FRAMES
+        # Build a compact activity log: last N lines, bold prefix, quiet text
+        raw = log_sig()[-8:]
+        if not raw:
+            activity = [Text("Waiting for activity...", fg=SECONDARY)]
+        else:
+            activity = []
+            for level, text in raw:
+                glyph = LOG_GLYPH.get(level, "•")
+                prefix = f"[{glyph}]" if level != "phase" else ""
+                # bold the level tag, rest quiet
+                parts = []
+                if prefix:
+                    parts.append(Text(prefix, bold=True, fg=accent()))
+                parts.append(Text(text, fg=SECONDARY))
+                if parts:
+                    activity.append(Text().join(parts))
+
         return Box(
             frame(
                 "Research running",
-                Text(f"{frames[spin_sig()]} {short_query(state['query'])}", bold=True),
+                Text(f"Query: {short_query(state['query'])}", bold=True),
                 gap(),
+                # Phase + a couple of compact activity lines
                 Text(lambda: phase_sig(), fg=SECONDARY),
+                *activity[:2],
+                gap(),
+                # Progress bar at bottom with pulsing indicator
                 Text(lambda: progress_bar(), fg=accent()),
-                Text(lambda: f"Step {prog_sig()[0]:.0f}/{prog_sig()[1]}  |  {elapsed_sig()}  |  {prog_sig()[2]}", fg=SECONDARY),
-                gap(),
-                frame("Activity", *activity_lines()),
-                gap(),
-                hint("Ctrl+C quits (partial work is lost)"),
-            )
+                Text(lambda: f"Step {prog_sig()[0]:.0f}/{prog_sig()[1]}  |  {elapsed_sig()}", fg=SECONDARY),
+            ),
+            gap(),
+            hint("Ctrl+C quits (partial work is lost)"),
         )
 
     if current == "done":
