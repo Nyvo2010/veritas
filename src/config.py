@@ -1,5 +1,7 @@
-"""
-Configuration file for Deep Research Agent - NVIDIA NIM Version
+"""Environment-based defaults and tuning constants for Veritas.
+
+Anything a user is expected to change lives in the settings file or is
+resolved from the environment (see settings.py). These are fallbacks.
 """
 
 import os
@@ -20,9 +22,11 @@ TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 # Model Configuration
 # Default model for all LLM inference (analysis, reasoning, reports).
 # Override per install via settings, the setup wizard, or LLM_MODEL.
-NVIDIA_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"  # For analysis and reasoning
-NVIDIA_REPORT_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"  # For report generation
+NVIDIA_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
 LLM_MODEL = os.environ.get("LLM_MODEL", NVIDIA_MODEL)
+# Optional second model the client switches to when the primary keeps
+# failing (see LLMClient). Empty means "no fallback".
+LLM_FALLBACK_MODEL = os.environ.get("LLM_FALLBACK_MODEL", "")
 TEMPERATURE_ANALYSIS = 0.3  # Lower for consistent reasoning
 TEMPERATURE_CREATIVE = 0.7  # Higher for report writing
 TOP_P = 0.95
@@ -30,9 +34,6 @@ TOP_P = 0.95
 # Report Generation Settings
 REPORT_SECTION_MAX_TOKENS = 12000
 REPORT_SUMMARY_MAX_TOKENS = 4000
-MIN_SECTION_LENGTH = 4000
-TARGET_REPORT_LENGTH = 30000
-MAX_PARALLEL_SECTIONS = 6
 
 # Rate Limiting
 MAX_RETRIES = 5
@@ -45,10 +46,7 @@ SEARCH_TIMEOUT = 90  # 1.5 minutes for search operations
 
 # Research Parameters
 MAX_RESEARCH_ITERATIONS = 10
-MAX_SUBQUESTIONS_PER_ITERATION = 5
 MAX_SEARCH_RESULTS = 15
-SEARCH_DEPTH_INITIAL = "basic"
-SEARCH_DEPTH_DEEP = "advanced"
 
 # Website domain mappings
 WEBSITE_CATEGORIES = {
@@ -95,26 +93,6 @@ WEBSITE_CATEGORIES = {
         "wsj.com",
     ],
 }
-
-# Default category toggles (True = include, False = exclude)
-DEFAULT_CATEGORY_TOGGLES = {
-    "social": True,
-    "educational": True,
-    "open_knowledge": True,
-    "news": True,
-    "general": True,
-}
-
-# Report Generation
-REPORT_SECTIONS = [
-    "Executive Summary",
-    "Background & Context",
-    "Key Findings",
-    "Detailed Analysis",
-    "Uncertainties & Gaps",
-    "Conclusion",
-    "Sources",
-]
 
 # Parallel Processing
 MAX_PARALLEL_SECTIONS = 6

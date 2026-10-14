@@ -223,7 +223,8 @@ def view_config(console: Console, agent: DeepResearchAgent, settings: dict):
     clear_screen()
     screens.print_header(console, "Configuration")
     screens.kv_panel(console, "System", [
-        ("Model", agent.nvidia.model),
+        ("Model", agent.llm.model),
+        ("Fallback model", agent.llm.fallback_model or "not set"),
         ("Endpoint", str(settings.get("llm_base_url", ""))),
         ("Parallel sections", str(MAX_PARALLEL_SECTIONS)),
         ("Theme", str(settings.get("theme", ""))),
@@ -249,7 +250,7 @@ def start_research(console: Console, agent: DeepResearchAgent, settings: dict):
         clear_screen()
         screens.print_header(console, "New Research")
         screens.kv_panel(console, "Session", [
-            ("Model", agent.nvidia.model),
+            ("Model", agent.llm.model),
             ("Reports to", reports_dir(settings)),
         ])
         query = Prompt.ask(f"[{theme.PRIMARY}]Query (Enter to cancel)[/{theme.PRIMARY}]").strip()

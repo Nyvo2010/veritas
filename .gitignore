@@ -33,5 +33,15 @@ reports/*.md
 build/
 dist/
 
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Agent / editor scratch
+.freebuff/
+
 # Logs
 *.log

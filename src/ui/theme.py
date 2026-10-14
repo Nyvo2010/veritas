@@ -61,12 +61,11 @@ DEFAULT_THEME = "cyan"
 
 def apply_theme(name: str) -> str:
     """Activate a color theme by name. Returns the active theme name."""
-    global PRIMARY, ACCENT_COLOR
+    global PRIMARY
     key = (name or "").strip().lower()
     if key not in THEMES:
         key = DEFAULT_THEME
     PRIMARY = THEMES[key]
-    ACCENT_COLOR = THEMES[key]
     return key
 
 

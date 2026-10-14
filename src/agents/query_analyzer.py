@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from typing import List, Dict
 
 from models.research_state import SubQuestion, ResearchState, QuestionStatus
-from utils.nvidia_client import NvidiaClient
+from utils.llm_client import LLMClient
 import uuid
 
 class QueryAnalyzerAgent:
@@ -19,8 +19,8 @@ class QueryAnalyzerAgent:
     and managing the question hierarchy using ReAct-style reasoning
     """
     
-    def __init__(self, nvidia_client: NvidiaClient):
-        self.nvidia = nvidia_client
+    def __init__(self, llm_client: LLMClient):
+        self.llm = llm_client
     
     def validate_query(self, query: str) -> bool:
         """
@@ -60,7 +60,7 @@ class QueryAnalyzerAgent:
             return []
 
         # Use LLM to decompose query
-        decomposition = self.nvidia.decompose_query(main_query)
+        decomposition = self.llm.decompose_query(main_query)
         
         # Convert to SubQuestion objects
         sub_questions = []
@@ -72,9 +72,12 @@ class QueryAnalyzerAgent:
             ui_manager.add_message("Generated Subquestions:", style="white")
         
         for i, sq_data in enumerate(decomposition.get("sub_questions", [])):
+            question_text = str(sq_data.get("question") or "").strip()
+            if not question_text:
+                continue  # skip malformed entries rather than crash later
             sub_q = SubQuestion(
                 id=str(uuid.uuid4()),
-                question=sq_data.get("question"),
+                question=question_text,
                 priority=sq_data.get("priority", 5),
                 depth=0,  # Top-level questions
                 status=QuestionStatus.PENDING,
@@ -86,7 +89,7 @@ class QueryAnalyzerAgent:
             
             if ui_manager:
                 # Show generated subquestions
-                ui_manager.add_message(f"{i+1}. {sq_data.get('question')}", style="white")
+                ui_manager.add_message(f"{i+1}. {question_text}", style="white")
 
         return sub_questions
     
@@ -200,7 +203,7 @@ Return JSON:
         ]
         
         try:
-            gaps_data = self.nvidia.chat_json(messages)
+            gaps_data = self.llm.chat_json(messages)
             
             all_gaps = (
                 gaps_data.get("critical_gaps", []) + 
