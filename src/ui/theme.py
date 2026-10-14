@@ -21,6 +21,7 @@ PANEL_PADDING = (0, 2)
 
 # Static VERITAS wordmark. Never animates, never resizes mid-run.
 COMPACT_LOGO = [
+    "",
     ".sSSS s.",
     "SSSSS SSSs. .sSSSSs.    .sSSSSSSSs. SSSSS .sSSSSSSSSSSSSSs. .sSSSSs.    .sSSSSSSSs.",
     "S SSS SSSSS S SSSSSSSs. S SSS SSSSS S SSS SSSSS S SSS SSSSS S SSSSSSSs. S SSS SSSS'",

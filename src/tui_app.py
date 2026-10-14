@@ -430,8 +430,8 @@ def sources_select(session: bool) -> SelectRenderable:
 
     options = []
     for name in toggles:
-        mark = "x" if toggles[name] else " "
-        options.append(SelectOption(f"[{mark}] {name.replace('_', ' ').title()}", name))
+        mark = "●" if toggles[name] else "○"
+        options.append(SelectOption(f"{mark} {name.replace('_', ' ').title()}", name))
     if session:
         options.append(SelectOption("Start research", "__start__", "Begin with these sources"))
     else:
