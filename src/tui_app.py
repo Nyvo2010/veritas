@@ -123,7 +123,11 @@ PANEL_BG = "#232326"        # neutral zinc, no color cast
 TITLE_FG = "#1c1c1e"        # near-black for title bars
 SECONDARY = "#8e8e93"       # descriptions, values
 TERTIARY = "#636366"        # hints, footnotes
+SUBTITLE = "#707074"        # button subtitles: dimmer than body, softer than hints
 DANGER = "#b86767"          # muted brick for errors
+
+INPUT_WIDTH = 64            # shared width for every text input
+SUBTITLE_LEN = 64           # subtitles truncate past this (keeps rows tidy)
 
 
 def gap(rows: int = 1) -> Text:
@@ -181,6 +185,54 @@ def hint(text: str) -> Text:
     return Text(text, fg=TERTIARY)
 
 
+THEME_BLURBS = {
+    "cyan": "Muted cadet teal",
+    "blue": "Dusty blue",
+    "magenta": "Muted mauve",
+    "green": "Sage",
+    "amber": "Muted brass",
+}
+
+
+def theme_options() -> list:
+    """Every theme button carries its tone as a subtitle."""
+    return [
+        SelectOption(name.title(), name, THEME_BLURBS.get(name, ""))
+        for name in theme.THEMES
+    ]
+
+
+def make_input(**kw) -> Input:
+    """Every text input shares one width and focus behavior."""
+    kw.setdefault("width", INPUT_WIDTH)
+    kw.setdefault("focused", True)
+    return Input(**kw)
+
+
+def screen_box(title: str, *children, enter: str, back: str | None = None) -> Box:
+    """Standard skeleton for list screens: panel, breathing room, key hint."""
+    keys = f"↑↓ move · Enter {enter}"
+    if back:
+        keys += f" · Esc {back}"
+    return Box(frame(title, *children), gap(), hint(keys))
+
+
+def input_frame(title: str, lines: list, inp, enter: str, back: str, kind: str = "Type") -> Box:
+    """Standard skeleton for text-entry screens: prompts, input, inline
+    validation, then the key hint outside the panel."""
+    return Box(
+        frame(title, *lines, inp, Text(err_sig() or "", fg=DANGER)),
+        gap(),
+        hint(f"{kind} · Enter {enter} · Esc {back}"),
+    )
+
+
+def kv_rows(pairs: list) -> list:
+    """Aligned stat rows: labels in one column, values in SECONDARY."""
+    width = max([len(label) for label, _ in pairs] + [0])
+    return [Text(f"{label:<{width}}  {value}", fg=SECONDARY) for label, value in pairs]
+
+
 def short_query(q: str, n: int = 70) -> str:
     q = " ".join(q.split())
     return q if len(q) <= n else q[: n - 3] + "..."
@@ -218,31 +270,27 @@ pump_stop = threading.Event()
 _keyboard_bound: dict = {}
 
 
-SUBTITLE_WIDTH = 44
-
-
 def tracked_select(name: str, options: list, **kw) -> SelectRenderable:
-    """Button-like select list: highlight hugs the content with even
-    padding on all sides, cursor surviving re-renders.
+    """Button-like select list: title with a dimmer subtitle below it,
+    highlight hugging the content, cursor surviving re-renders.
 
-    Every button carries its subtitle inline in an aligned second column,
-    so all rows share one compact shape. The logo ticker re-evaluates
-    the tree several times a second; without a persistent cursor every
-    rebuild would jump back to the top option.
+    Subtitles use the native description line (SUBTITLE color, TITLE_FG
+    on the selected row) indented to sit under the title text. The logo
+    ticker re-evaluates the tree several times a second; without a
+    persistent cursor every rebuild would jump back to the top option.
     """
-    labels = [str(opt.name).strip() for opt in options]
-    width = max([len(label) for label in labels] + [0])
-    for opt, label in zip(options, labels):
+    for opt in options:
+        opt.name = f"  {str(opt.name).strip()}  "
         subtitle = str(getattr(opt, "description", "") or "").strip()
-        if len(subtitle) > SUBTITLE_WIDTH:
-            subtitle = subtitle[: SUBTITLE_WIDTH - 1] + "…"
-        padded = f"  {label:<{width}}  "
-        opt.name = padded + subtitle if subtitle else padded.rstrip() + "  "
-        opt.description = ""
+        if len(subtitle) > SUBTITLE_LEN:
+            subtitle = subtitle[: SUBTITLE_LEN - 1] + "…"
+        opt.description = f"  {subtitle}" if subtitle else ""
     kw.setdefault("selected_background_color", accent())
     kw.setdefault("selected_text_color", TITLE_FG)
+    kw.setdefault("selected_description_color", TITLE_FG)
+    kw.setdefault("description_color", SUBTITLE)
     kw.setdefault("item_spacing", 1)
-    kw.setdefault("show_description", False)
+    kw.setdefault("show_description", True)
     initial = min(state["cursors"].get(name, 0), max(len(options) - 1, 0))
 
     def on_move(idx: int, opt) -> None:
@@ -487,7 +535,7 @@ def App():
             gap(),
             frame("Main Menu", sel),
             gap(),
-            hint("Up/Down to move, Enter to select, q to quit"),
+            hint("↑↓ move · Enter select · q quit"),
         )
 
     if current == "query":
@@ -501,21 +549,18 @@ def App():
             state["max_iter"] = int(settings_sig().get("max_iterations", 10))
             screen.set("iterations")
 
-        query_input = Input(
+        query_input = make_input(
             value=state["query"],
             placeholder="Type your question...",
-            focused=True,
             on_submit=submit,
         )
         inputs["query"] = query_input
-        return Box(
-            frame(
-                "New research (1/3)",
-                Text("What do you want to research?"),
-                query_input,
-                Text(err_sig() or "", fg=DANGER),
-                hint("Enter to continue, Esc to go back"),
-            )
+        return input_frame(
+            "New research (1/3)",
+            [Text("What do you want to research?")],
+            query_input,
+            enter="continue",
+            back="back",
         )
 
     if current == "iterations":
@@ -531,22 +576,21 @@ def App():
             state["cursors"]["sources"] = 0
             screen.set("sources")
 
-        iter_input = Input(
+        iter_input = make_input(
             value="",
             placeholder=f"1-20 (empty keeps {state['max_iter']})",
-            focused=True,
             on_submit=submit,
         )
         inputs["iterations"] = iter_input
-        return Box(
-            frame(
-                "New research (2/3)",
+        return input_frame(
+            "New research (2/3)",
+            [
                 Text(f"Query: {short_query(state['query'])}"),
                 Text(f"Max iterations (default {state['max_iter']}, 1-20):"),
-                iter_input,
-                Text(err_sig() or "", fg=DANGER),
-                hint("Enter to continue, Esc to go back"),
-            )
+            ],
+            iter_input,
+            enter="continue",
+            back="back",
         )
 
     if current == "sources":
@@ -557,8 +601,9 @@ def App():
                 "New research (3/3)",
                 Text(f"Query: {short_query(state['query'])}  |  Iterations: {state['max_iter']}"),
                 sel,
-                hint("Up/Down to move, Enter toggles a source, Esc to go back"),
-            )
+            ),
+            gap(),
+            hint("↑↓ move · Enter toggle · Esc back"),
         )
 
     if current == "run":
@@ -582,27 +627,27 @@ def App():
         result = state["result"] or {"ok": False, "error": "No result recorded."}
         if result.get("ok"):
             saved = result.get("saved") or "not saved"
-            body = "\n".join(
+            rows = kv_rows(
                 [
-                    f"Duration:    {theme.format_duration(result.get('duration', 0))}",
-                    f"Iterations:   {result.get('iterations', 0)}",
-                    f"Questions:    {result.get('questions', 0)}",
-                    f"Searches:     {result.get('searches', 0)}",
-                    f"Findings:     {result.get('findings', 0)}",
-                    f"Gaps:         {result.get('gaps', 0)}",
-                    f"Report:       {result.get('report_len', 0):,} chars",
-                    f"Saved to:     {saved}",
+                    ("Duration", theme.format_duration(result.get("duration", 0))),
+                    ("Iterations", str(result.get("iterations", 0))),
+                    ("Questions", str(result.get("questions", 0))),
+                    ("Searches", str(result.get("searches", 0))),
+                    ("Findings", str(result.get("findings", 0))),
+                    ("Gaps", str(result.get("gaps", 0))),
+                    ("Report", f"{result.get('report_len', 0):,} chars"),
+                    ("Saved to", saved),
                 ]
             )
             return Box(
-                frame("Research complete", Text(body)),
+                frame("Research complete", *rows),
                 gap(),
-                hint("Enter to return to the menu"),
+                hint("Enter for the menu"),
             )
         return Box(
             frame("Research failed", Text(str(result.get("error", "Unknown error")), fg=DANGER)),
             gap(),
-            hint("Enter to return to the menu"),
+            hint("Enter for the menu"),
         )
 
     if current == "settings":
@@ -618,7 +663,7 @@ def App():
         active = s.get("category_toggles", {})
         on = sum(1 for v in active.values() if v)
         sel = tracked_select("settings", [
-            SelectOption("Color theme", "set-theme", f"Current: {s.get('theme', '')}"),
+            SelectOption("Color theme", "set-theme", f"Current: {s.get('theme', '').title()}"),
             SelectOption("Reports folder", "set-reports", reports_dir(s)),
             SelectOption("API keys", "set-keys", "NVIDIA + Tavily, stored locally"),
             SelectOption("Research defaults", "set-defaults", "Iterations + results per search"),
@@ -627,11 +672,7 @@ def App():
             SelectOption("Back", "back"),
         ])
         sel.on("itemSelected", on_pick)
-        return Box(
-            frame("Settings", sel),
-            gap(),
-            hint("Up/Down to move, Enter to edit, Esc for menu"),
-        )
+        return screen_box("Settings", sel, enter="edit", back="menu")
 
     if current == "set-theme":
         def on_pick(index: int, opt) -> None:
@@ -639,16 +680,9 @@ def App():
             settings_sig.set(load_settings())
             screen.set("settings")
 
-        sel = tracked_select(
-            "set-theme",
-            [SelectOption(name, name) for name in theme.THEMES],
-        )
+        sel = tracked_select("set-theme", theme_options())
         sel.on("itemSelected", on_pick)
-        return Box(
-            frame("Color theme", sel),
-            gap(),
-            hint("Enter to apply, Esc to go back"),
-        )
+        return screen_box("Color theme", sel, enter="apply", back="back")
 
     if current == "set-reports":
         def submit(value: str) -> None:
@@ -667,21 +701,18 @@ def App():
             settings_sig.set(load_settings())
             screen.set("settings")
 
-        reports_input = Input(
+        reports_input = make_input(
             value="",
             placeholder="New path (empty keeps current)",
-            focused=True,
             on_submit=submit,
         )
         inputs["set-reports"] = reports_input
-        return Box(
-            frame(
-                "Reports folder",
-                Text(f"Current: {reports_dir(settings_sig())}"),
-                reports_input,
-                Text(err_sig() or "", fg=DANGER),
-                hint("Enter to save, Esc to go back"),
-            )
+        return input_frame(
+            "Reports folder",
+            [Text(f"Current: {reports_dir(settings_sig())}")],
+            reports_input,
+            enter="save",
+            back="back",
         )
 
     if current == "set-keys":
@@ -706,10 +737,12 @@ def App():
             + [SelectOption("Back", "back")],
         )
         sel.on("itemSelected", on_pick)
-        return Box(
-            frame("API keys", sel),
-            gap(),
-            hint("Keys are stored only in your local settings file"),
+        return screen_box(
+            "API keys",
+            Text("Keys are stored only in your local settings file.", fg=SECONDARY),
+            sel,
+            enter="edit",
+            back="back",
         )
 
     if current == "set-key":
@@ -727,19 +760,12 @@ def App():
                 settings_sig.set(load_settings())
             screen.set("set-keys")
 
-        key_input = Input(
+        key_input = make_input(
             placeholder="Paste a new value, Enter to save",
-            focused=True,
             on_submit=submit,
         )
         inputs["set-key"] = key_input
-        return Box(
-            frame(
-                label,
-                key_input,
-                hint("Enter to save, Esc to go back"),
-            )
-        )
+        return input_frame(label, [], key_input, enter="save", back="back", kind="Paste")
 
     if current == "set-defaults":
         def on_pick(index: int, opt) -> None:
@@ -758,11 +784,7 @@ def App():
             SelectOption("Back", "back"),
         ])
         sel.on("itemSelected", on_pick)
-        return Box(
-            frame("Research defaults", sel),
-            gap(),
-            hint("Enter to edit, Esc to go back"),
-        )
+        return screen_box("Research defaults", sel, enter="edit", back="back")
 
     if current == "set-default":
         field = state["default_field"]
@@ -781,30 +803,25 @@ def App():
             settings_sig.set(load_settings())
             screen.set("set-defaults")
 
-        default_input = Input(
+        default_input = make_input(
             value="",
             placeholder="1-20 (empty keeps current)",
-            focused=True,
             on_submit=submit,
         )
         inputs["set-default"] = default_input
-        return Box(
-            frame(
-                label,
-                Text(f"Current: {settings_sig().get(field, '')}"),
-                default_input,
-                Text(err_sig() or "", fg=DANGER),
-                hint("Enter to save, Esc to go back"),
-            )
+        return input_frame(
+            label,
+            [Text(f"Current: {settings_sig().get(field, '')}")],
+            default_input,
+            enter="save",
+            back="back",
         )
 
     if current == "set-sources":
         sel = sources_select(session=False)
-        return Box(
-            frame("Default sources", sel),
-            gap(),
-            hint("Enter toggles a source, Esc to go back"),
-        )
+        toggles = settings_sig().get("category_toggles", {})
+        on = sum(1 for v in toggles.values() if v)
+        return screen_box(f"Default sources ({on}/{len(toggles)})", sel, enter="toggle", back="back")
 
     if current == "setup-welcome":
         def on_pick(index: int, opt) -> None:
@@ -817,7 +834,7 @@ def App():
 
         sel = tracked_select("setup-welcome", [
             SelectOption("Continue setup", "start", "Takes about a minute"),
-            SelectOption("Back to menu", "menu", "Finish later via Settings"),
+            SelectOption("Back", "menu", "Return to the main menu"),
         ])
         sel.on("itemSelected", on_pick)
         return Box(
@@ -831,7 +848,7 @@ def App():
                 sel,
             ),
             gap(),
-            hint("Enter to choose, Esc for menu"),
+            hint("↑↓ move · Enter choose · Esc menu"),
         )
 
     if current in ("setup-nvidia", "setup-tavily"):
@@ -850,22 +867,19 @@ def App():
             state.setdefault("setup", {})[field] = raw
             screen.set(nxt)
 
-        key_input = Input(
+        key_input = make_input(
             placeholder=f"Paste your key from {where}",
-            focused=True,
             on_submit=submit,
         )
         inputs[current] = key_input
         step = "Setup (1/4)" if is_nvidia else "Setup (2/4)"
-        return Box(
-            frame(
-                step,
-                Text(label, bold=True),
-                Text(f"Get one at {where}.", fg=SECONDARY),
-                key_input,
-                Text(err_sig() or "", fg=DANGER),
-                hint("Enter to continue, Esc to stop"),
-            )
+        return input_frame(
+            step,
+            [Text(label, bold=True), Text(f"Get one at {where}.", fg=SECONDARY)],
+            key_input,
+            enter="continue",
+            back="stop",
+            kind="Paste",
         )
 
     if current == "setup-reports":
@@ -882,22 +896,21 @@ def App():
             err_sig.set("")
             screen.set("setup-theme")
 
-        reports_setup_input = Input(
+        reports_setup_input = make_input(
             value="",
             placeholder="Empty keeps the default",
-            focused=True,
             on_submit=submit,
         )
         inputs["setup-reports"] = reports_setup_input
-        return Box(
-            frame(
-                "Setup (3/4)",
+        return input_frame(
+            "Setup (3/4)",
+            [
                 Text("Reports folder", bold=True),
                 Text(f"Default: {reports_dir(settings_sig())}", fg=SECONDARY),
-                reports_setup_input,
-                Text(err_sig() or "", fg=DANGER),
-                hint("Enter to continue, Esc to stop"),
-            )
+            ],
+            reports_setup_input,
+            enter="continue",
+            back="stop",
         )
 
     if current == "setup-theme":
@@ -911,15 +924,12 @@ def App():
             settings_sig.set(load_settings())
             screen.set("setup-done")
 
-        sel = tracked_select(
-            "setup-theme",
-            [SelectOption(name, name) for name in theme.THEMES],
-        )
+        sel = tracked_select("setup-theme", theme_options())
         sel.on("itemSelected", on_pick)
         return Box(
             frame("Setup (4/4)", Text("Pick a color theme", bold=True), sel),
             gap(),
-            hint("Enter to finish setup"),
+            hint("↑↓ move · Enter finish · Esc back"),
         )
 
     if current == "setup-done":
@@ -935,10 +945,14 @@ def App():
             frame(
                 "All set",
                 Text("Saved on this machine:", bold=True),
-                Text(f"NVIDIA key  {mask_key(s.get('nvidia_api_key', ''))}", fg=SECONDARY),
-                Text(f"Tavily key  {mask_key(s.get('tavily_api_key', ''))}", fg=SECONDARY),
-                Text(f"Reports     {reports_dir(s)}", fg=SECONDARY),
-                Text(f"Theme       {s.get('theme', '')}", fg=SECONDARY),
+                *kv_rows(
+                    [
+                        ("NVIDIA key", mask_key(s.get("nvidia_api_key", ""))),
+                        ("Tavily key", mask_key(s.get("tavily_api_key", ""))),
+                        ("Reports", reports_dir(s)),
+                        ("Theme", str(s.get("theme", "")).title()),
+                    ]
+                ),
                 gap(),
                 sel,
             ),
