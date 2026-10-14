@@ -350,7 +350,7 @@ def build_agent(settings: dict):
     )
 
 
-def main():
+def classic_main():
     console = Console()
     settings = load_settings()
     apply_saved_theme(settings)
@@ -434,6 +434,18 @@ def main():
             screens.print_header(console)
             screens.print_panel(console, "Thank you for using Veritas. Goodbye.", "Exit")
             sys.exit(0)
+
+
+def main():
+    """Launch the OpenTUI app, falling back to the Rich CLI if needed."""
+    try:
+        from tui_app import run as run_tui
+    except ImportError:
+        return classic_main()
+    try:
+        run_tui()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

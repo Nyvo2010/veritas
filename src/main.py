@@ -95,7 +95,8 @@ class DeepResearchAgent:
         self,
         query: str,
         max_iterations: int = MAX_RESEARCH_ITERATIONS,
-        verbose: bool = True
+        verbose: bool = True,
+        ui=None,
     ) -> ResearchState:
         """
         Execute deep research on a query
@@ -103,7 +104,10 @@ class DeepResearchAgent:
         Args:
             query: The research query
             max_iterations: Maximum research iterations
-            verbose: Whether to print progress
+            verbose: Whether to print progress (set False when an external
+                frontend such as OpenTUI renders progress itself)
+            ui: Optional UI object (UIManager-compatible). A default live
+                UIManager is created when omitted.
 
         Returns:
             ResearchState with all findings and final report
@@ -117,7 +121,8 @@ class DeepResearchAgent:
         # Progress budget: decomposition + bounded iterations + cross-ref + report headroom.
         # Report sections vary (6-10 themes), so headroom is adjusted once known.
         estimated_steps = 1 + max_iterations + 1 + 12
-        ui = UIManager(console=self.console)
+        if ui is None:
+            ui = UIManager(console=self.console)
         short_query = query if len(query) <= 60 else query[:57] + "..."
         ui.initialize(estimated_steps, f"Research: {short_query}")
         ui.set_status("Preparing research environment...")
@@ -325,16 +330,17 @@ class DeepResearchAgent:
             summary_table.add_row("Gaps Identified:", str(len(state.gaps)))
             summary_table.add_row("Report Length:", f"{len(final_report):,} chars")
 
-            summary_panel = Panel(
-                summary_table,
-                title="Research Complete",
-                title_align="left",
-                box=box.ROUNDED,
-                style="green",
-                padding=(1, 2)
-            )
-            self.console.print(summary_panel)
-            self.console.print()
+            if verbose:
+                summary_panel = Panel(
+                    summary_table,
+                    title="Research Complete",
+                    title_align="left",
+                    box=box.ROUNDED,
+                    style="green",
+                    padding=(1, 2)
+                )
+                self.console.print(summary_panel)
+                self.console.print()
 
             return state
 
@@ -342,17 +348,18 @@ class DeepResearchAgent:
             # Ensure UI is cleaned up even if there's an error
             ui.stop()
 
-            # Show error message in UI
-            error_panel = Panel(
-                Text(f"Error during research: {str(e)}", style="bold red"),
-                title="Research Error",
-                title_align="left",
-                box=box.ROUNDED,
-                style="red",
-                padding=(1, 2)
-            )
-            self.console.print(error_panel)
-            self.console.print()
+            if verbose:
+                # Show error message in UI
+                error_panel = Panel(
+                    Text(f"Error during research: {str(e)}", style="bold red"),
+                    title="Research Error",
+                    title_align="left",
+                    box=box.ROUNDED,
+                    style="red",
+                    padding=(1, 2)
+                )
+                self.console.print(error_panel)
+                self.console.print()
 
             # Keep the traceback in the research record, not on stdout
             state.reasoning_steps.append("[ERROR] Full traceback:")
