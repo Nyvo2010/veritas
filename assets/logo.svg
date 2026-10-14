@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 796.8 170.2" width="796.8" height="170.2" role="img" aria-labelledby="veritas-logo-title">
+  <title id="veritas-logo-title">Veritas</title>
+  <!-- VERITAS wordmark, hand-drawn ASCII art. Transparent background: there is
+       no <rect> behind the glyphs, so whatever sits under the image shows through.
+       textLength + lengthAdjust keep every column aligned even when the viewer's
+       monospace font has different metrics than the one used to draw the art. -->
+  <g fill="currentColor" color="#5f9ea0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="16.0" font-weight="700" letter-spacing="0">
+    <text x="0" y="14.35" textLength="76.8" lengthAdjust="spacing" xml:space="preserve">.sSSS s.</text>
+    <text x="0" y="32.75" textLength="796.8" lengthAdjust="spacing" xml:space="preserve">SSSSS SSSs. .sSSSSs.    .sSSSSSSSs. SSSSS .sSSSSSSSSSSSSSs. .sSSSSs.    .sSSSSSSSs.</text>
+    <text x="0" y="51.15" textLength="796.8" lengthAdjust="spacing" xml:space="preserve">S SSS SSSSS S SSSSSSSs. S SSS SSSSS S SSS SSSSS S SSS SSSSS S SSSSSSSs. S SSS SSSS'</text>
+    <text x="0" y="69.55" textLength="739.2" lengthAdjust="spacing" xml:space="preserve">S  SS SSSSS S  SS SSSS' S  SS SSSS' S  SS SSSSS S  SS SSSSS S  SS SSSSS S  SS</text>
+    <text x="0" y="87.95" textLength="796.8" lengthAdjust="spacing" xml:space="preserve">S..SS SSSSS S..SS       S..SSsSSSa. S..SS `:S:' S..SS `:S:' S..SSsSSSSS `SSSSsSSSa.</text>
+    <text x="0" y="106.35" textLength="796.8" lengthAdjust="spacing" xml:space="preserve"> S::S SSSS  S:::SSSS    S:::S SSSSS S:::S       S:::S       S:::S SSSSS .sSSS SSSSS</text>
+    <text x="0" y="124.75" textLength="796.8" lengthAdjust="spacing" xml:space="preserve">  S;S SSS   S;;;S       S;;;S SSSSS S;;;S       S;;;S       S;;;S SSSSS S;;;S SSSSS</text>
+    <text x="0" y="143.15" textLength="796.8" lengthAdjust="spacing" xml:space="preserve">   SS SS    S%%%S SSSSS S%%%S SSSSS S%%%S       S%%%S       S%%%S SSSSS S%%%S SSSSS</text>
+    <text x="0" y="161.55" textLength="796.8" lengthAdjust="spacing" xml:space="preserve">    SsS     SSSSSsSS;:' SSSSS SSSSS SSSSS       SSSSS       SSSSS SSSSS SSSSSsSSSSS</text>
+  </g>
+</svg>

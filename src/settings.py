@@ -29,6 +29,8 @@ load_dotenv()
 
 DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
+# Empty = no fallback. Used when the primary model keeps failing.
+DEFAULT_FALLBACK_MODEL = ""
 
 DEFAULTS: Dict[str, Any] = {
     "theme": "cyan",
@@ -36,6 +38,7 @@ DEFAULTS: Dict[str, Any] = {
     "llm_api_key": "",
     "llm_base_url": DEFAULT_NVIDIA_BASE_URL,
     "llm_model": DEFAULT_MODEL,
+    "llm_fallback_model": DEFAULT_FALLBACK_MODEL,
     "tavily_api_key": "",
     "max_iterations": 10,
     "max_search_results": 15,
@@ -134,7 +137,18 @@ def resolve_llm(settings: Dict[str, Any] = None) -> Dict[str, str]:
         os.environ.get("LLM_MODEL", "").strip()
         or str(settings.get("llm_model", "") or DEFAULT_MODEL).strip()
     )
-    return {"api_key": api_key, "base_url": base_url, "model": model}
+    fallback_model = (
+        os.environ.get("LLM_FALLBACK_MODEL", "").strip()
+        or str(settings.get("llm_fallback_model", "") or "").strip()
+    )
+    if fallback_model == model:
+        fallback_model = ""
+    return {
+        "api_key": api_key,
+        "base_url": base_url,
+        "model": model,
+        "fallback_model": fallback_model,
+    }
 
 
 def resolve_api_keys(settings: Dict[str, Any] = None) -> Tuple[str, str, str]:

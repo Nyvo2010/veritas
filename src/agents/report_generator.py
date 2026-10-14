@@ -11,7 +11,7 @@ import asyncio
 from typing import List, Dict
 
 from models.research_state import ResearchState, ReportSection
-from utils.nvidia_client import NvidiaClient
+from utils.llm_client import LLMClient
 from config import MAX_PARALLEL_SECTIONS
 
 
@@ -21,8 +21,8 @@ class ReportGeneratorAgent:
     Uses divide-and-conquer approach with parallel section generation
     """
     
-    def __init__(self, nvidia_client: NvidiaClient):
-        self.nvidia = nvidia_client
+    def __init__(self, llm_client: LLMClient):
+        self.llm = llm_client
     
     async def generate_report(
         self,
@@ -99,7 +99,7 @@ class ReportGeneratorAgent:
         ]
         
         themes = await asyncio.to_thread(
-            self.nvidia.identify_report_themes, findings_data
+            self.llm.identify_report_themes, findings_data
         )
         
         # Suppress theme analysis output
@@ -118,8 +118,16 @@ class ReportGeneratorAgent:
         Generate report sections in parallel using asyncio
         """
         tasks = []
-        
-        for i, theme in enumerate(themes['themes']):
+        theme_list = themes.get("themes") if isinstance(themes, dict) else None
+        if not theme_list:
+            # The model occasionally omits themes; never fail the whole report.
+            theme_list = [{
+                "title": "Analysis",
+                "description": f"Comprehensive analysis of: {state.main_query}",
+                "related_findings": [],
+            }]
+
+        for i, theme in enumerate(theme_list):
             # Get findings related to this theme
             related_indices = theme.get('related_findings', [])
             # Convert indices to integers (in case they're strings from JSON)
@@ -145,14 +153,16 @@ class ReportGeneratorAgent:
                 ]
             
             # Create async task
-            task = self.nvidia.generate_section_async(
-                section_title=theme['title'],
-                theme_description=theme['description'],
+            title = theme.get("title") or f"Section {i + 1}"
+            description = theme.get("description") or title
+            task = self.llm.generate_section_async(
+                section_title=title,
+                theme_description=description,
                 relevant_findings=relevant_findings,
                 main_query=state.main_query,
                 style=style
             )
-            tasks.append((i, theme['title'], task))
+            tasks.append((i, title, task))
         
         # Execute tasks with concurrency limit
         sections = []
@@ -244,7 +254,7 @@ class ReportGeneratorAgent:
         ]
         
         summary = await asyncio.to_thread(
-            self.nvidia.generate_executive_summary,
+            self.llm.generate_executive_summary,
             state.main_query,
             section_contents,
             key_findings,
@@ -318,7 +328,8 @@ class ReportGeneratorAgent:
             sources.values(),
             key=lambda x: x["number"]
         )
-        content = "\nSOURCES\n\n"
+        # No heading here: _assemble_report writes the "SOURCES" title.
+        content = ""
         for source in sorted_sources:
             content += f"{source['number']}. {source['title']}\n    {source['url']}\n"
         content += "\n"

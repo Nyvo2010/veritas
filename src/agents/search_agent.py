@@ -16,7 +16,7 @@ from models.research_state import (
     ResearchState
 )
 from utils.tavily_client import TavilySearchClient
-from utils.nvidia_client import NvidiaClient
+from utils.llm_client import LLMClient
 from config import MAX_SEARCH_RESULTS
 
 
@@ -25,9 +25,9 @@ class SearchAgent:
     Agent responsible for executing searches and enriching results with full content
     """
     
-    def __init__(self, tavily_client: TavilySearchClient, nvidia_client: NvidiaClient):
+    def __init__(self, tavily_client: TavilySearchClient, llm_client: LLMClient):
         self.tavily = tavily_client
-        self.nvidia = nvidia_client
+        self.llm = llm_client
     
     async def execute_search(
         self,
@@ -78,10 +78,7 @@ class SearchAgent:
             )
             
             state.total_searches += 1
-            
-            # Extract LLM answer if available
-            llm_answer = response.get("answer")
-            
+
             # Convert to SearchResult objects
             results = []
             raw_results = response.get("results", [])

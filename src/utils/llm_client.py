@@ -24,10 +24,10 @@ log = logging.getLogger(__name__)
 
 try:
     from config import (
-        NVIDIA_API_KEY,
         LLM_API_KEY,
         LLM_BASE_URL,
         LLM_MODEL,
+        LLM_FALLBACK_MODEL,
         TEMPERATURE_ANALYSIS,
         TEMPERATURE_CREATIVE,
         TOP_P,
@@ -151,6 +151,7 @@ class LLMClient:
         api_key: str = None,
         api_base_url: str = None,
         model: str = None,
+        fallback_model: str = None,
     ):
         """
         Initialize the LLM client.
@@ -159,6 +160,8 @@ class LLMClient:
             api_key: API key for the endpoint (default from config/env)
             api_base_url: Base URL of the OpenAI-compatible endpoint
             model: Model id to use for all inference (default from config/env)
+            fallback_model: Optional model to retry with when the primary one
+                keeps failing (default from config/env). Empty disables it.
         """
         self.api_base_url = self._normalize_base_url(api_base_url or LLM_BASE_URL)
         timeout = API_REQUEST_TIMEOUT if API_REQUEST_TIMEOUT else 120
@@ -174,6 +177,11 @@ class LLMClient:
             timeout=timeout,
         )
         self.model = (model or LLM_MODEL).strip() if (model or LLM_MODEL) else ""
+        default_fallback = fallback_model if fallback_model is not None else LLM_FALLBACK_MODEL
+        self.fallback_model = (default_fallback or "").strip()
+        if self.fallback_model == self.model:
+            self.fallback_model = ""
+        self.using_fallback = False
         self.max_retries = MAX_RETRIES
         self.retry_delay = RETRY_DELAY
         self._last_api_call = 0  # Track last API call time for rate limiting
@@ -213,6 +221,27 @@ class LLMClient:
         """List model ids advertised by this client's endpoint."""
         return fetch_models(self.api_base_url, getattr(self.client, "api_key", "") or "", timeout=timeout)
 
+    def _with_fallback(self, call, *args, **kwargs):
+        """Run *call*, retrying once on the fallback model if one is set.
+
+        The primary model gets its full retry budget first; only when it
+        exhausts that do we switch. Once switched we stay on the fallback for
+        the rest of this client's life (a fresh client is built per run).
+        """
+        try:
+            return call(*args, **kwargs)
+        except Exception as exc:
+            fallback = (self.fallback_model or "").strip()
+            if not fallback or fallback == self.model:
+                raise
+            log.warning(
+                "Model %r failed after %s attempts (%s); retrying with fallback %r",
+                self.model, self.max_retries, exc, fallback,
+            )
+            self.model = fallback
+            self.using_fallback = True
+            return call(*args, **kwargs)
+
     def _handle_rate_limit_sync(self, attempt: int) -> bool:
         """
         Handle rate limit with exponential backoff
@@ -250,6 +279,28 @@ class LLMClient:
         return True
 
     def chat_completion(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = TEMPERATURE_ANALYSIS,
+        max_tokens: int = 4096,
+        stream: bool = False,
+        json_mode: bool = False,
+        top_p: float = TOP_P,
+        reasoning_effort: str = None,  # Kept for compatibility, ignored by most endpoints
+    ) -> str:
+        """Chat completion with the primary model, falling back once if it fails."""
+        return self._with_fallback(
+            self._chat_completion,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=stream,
+            json_mode=json_mode,
+            top_p=top_p,
+            reasoning_effort=reasoning_effort,
+        )
+
+    def _chat_completion(
         self,
         messages: List[Dict[str, str]],
         temperature: float = TEMPERATURE_ANALYSIS,
@@ -604,6 +655,33 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
         main_query: str,
         style: str = "comprehensive"
     ) -> str:
+        """Section generation with the primary model, falling back once on failure."""
+        try:
+            return await self._generate_section_async(
+                section_title, theme_description, relevant_findings, main_query, style
+            )
+        except Exception as exc:
+            fallback = (self.fallback_model or "").strip()
+            if not fallback or fallback == self.model:
+                raise
+            log.warning(
+                "Model %r failed generating section %r (%s); retrying with fallback %r",
+                self.model, section_title, exc, fallback,
+            )
+            self.model = fallback
+            self.using_fallback = True
+            return await self._generate_section_async(
+                section_title, theme_description, relevant_findings, main_query, style
+            )
+
+    async def _generate_section_async(
+        self,
+        section_title: str,
+        theme_description: str,
+        relevant_findings: List[Dict],
+        main_query: str,
+        style: str = "comprehensive"
+    ) -> str:
         """
         Generate a single report section asynchronously
 
@@ -729,6 +807,17 @@ Focus on DEPTH over BREADTH. This section should reveal something specific and i
         all_sections: List[str],
         key_findings: List[str]
     ) -> str:
+        """Executive summary with the primary model, falling back once on failure."""
+        return self._with_fallback(
+            self._generate_executive_summary, main_query, all_sections, key_findings
+        )
+
+    def _generate_executive_summary(
+        self,
+        main_query: str,
+        all_sections: List[str],
+        key_findings: List[str]
+    ) -> str:
         """Generate executive summary after all sections are complete"""
         system_prompt = """You are an expert at writing CONCISE, INSIGHTFUL executive summaries.
 
@@ -799,6 +888,3 @@ Write a FOCUSED executive summary (600-900 words) that captures the most importa
 
         raise Exception(f"Failed to generate summary after {self.max_retries} attempts")
 
-
-# Backward-compatible alias: the client used to be NVIDIA-only.
-NvidiaClient = LLMClient

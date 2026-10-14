@@ -71,18 +71,19 @@ class DeepResearchAgent:
         llm = resolve_llm(self._settings)
 
         # Initialize clients
-        self.nvidia = LLMClient(
+        self.llm = LLMClient(
             api_key=(llm_api_key or file_llm),
             api_base_url=llm["base_url"],
             model=llm["model"],
+            fallback_model=llm.get("fallback_model", ""),
         )
         self.tavily = TavilySearchClient(api_key=(tavily_api_key or file_tavily))
 
         # Initialize agents
-        self.query_analyzer = QueryAnalyzerAgent(self.nvidia)
-        self.search_agent = SearchAgent(self.tavily, self.nvidia)
-        self.synthesis_agent = SynthesisAgent(self.nvidia)
-        self.report_generator = ReportGeneratorAgent(self.nvidia)
+        self.query_analyzer = QueryAnalyzerAgent(self.llm)
+        self.search_agent = SearchAgent(self.tavily, self.llm)
+        self.synthesis_agent = SynthesisAgent(self.llm)
+        self.report_generator = ReportGeneratorAgent(self.llm)
 
         # Category toggles
         if category_toggles:

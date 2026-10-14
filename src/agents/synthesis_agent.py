@@ -16,7 +16,7 @@ from models.research_state import (
     ResearchGap,
     ResearchState
 )
-from utils.nvidia_client import NvidiaClient
+from utils.llm_client import LLMClient
 
 
 class SynthesisAgent:
@@ -25,8 +25,8 @@ class SynthesisAgent:
     Uses ReAct-style reasoning to determine next actions
     """
     
-    def __init__(self, nvidia_client: NvidiaClient):
-        self.nvidia = nvidia_client
+    def __init__(self, llm_client: LLMClient):
+        self.llm = llm_client
     
     def analyze_results(
         self,
@@ -71,7 +71,7 @@ class SynthesisAgent:
         # Suppress LLM analysis message
         
         # Use NVIDIA NIM to analyze with ReAct reasoning
-        analysis = self.nvidia.analyze_search_results(
+        analysis = self.llm.analyze_search_results(
             question=question.question,
             search_results=results_data,
             previous_findings=previous_findings
@@ -183,7 +183,7 @@ Return JSON:
         # Suppress LLM cross-analysis message
         
         try:
-            cross_ref = self.nvidia.chat_json(messages)
+            cross_ref = self.llm.chat_json(messages)
             
             if ui_manager:
                 # Show only: Analyzing findings found (x) conflicts/agreements, (x) uncertainties
