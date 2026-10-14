@@ -30,6 +30,8 @@ COMPACT_LOGO = [
     "  S;S SSS   S;;;S       S;;;S SSSSS S;;;S       S;;;S       S;;;S SSSSS S;;;S SSSSS",
     "   SS SS    S%%%S SSSSS S%%%S SSSSS S%%%S       S%%%S       S%%%S SSSSS S%%%S SSSSS",
     "    SsS     SSSSSsSS;:' SSSSS SSSSS SSSSS       SSSSS       SSSSS SSSSS SSSSSsSSSSS",
+    "",
+    " Made by Nyvø w/ love                                            Powered by Tavily "
 ]
 
 LOGO_SUBTITLE = "Deep Research Agent"

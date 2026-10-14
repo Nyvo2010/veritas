@@ -44,6 +44,7 @@ from settings import (
     load_settings,
     mask_key,
     reports_dir,
+    resolve_api_keys,
     update_settings,
 )
 from ui import theme
@@ -72,7 +73,10 @@ LOG_GLYPH = {
     "info": ".",
 }
 
-INPUT_SCREENS = {"query", "iterations", "set-reports", "set-key", "set-default"}
+INPUT_SCREENS = {
+    "query", "iterations", "set-reports", "set-key", "set-default",
+    "setup-nvidia", "setup-tavily", "setup-reports",
+}
 
 BACK = {
     "query": "menu",
@@ -88,6 +92,12 @@ BACK = {
     "set-defaults": "settings",
     "set-default": "set-defaults",
     "set-sources": "settings",
+    "setup-welcome": "menu",
+    "setup-nvidia": "setup-welcome",
+    "setup-tavily": "setup-nvidia",
+    "setup-reports": "setup-tavily",
+    "setup-theme": "setup-reports",
+    "setup-done": None,
 }
 
 
@@ -188,6 +198,7 @@ phase_sig = Signal("Preparing...")
 elapsed_sig = Signal("0s")
 spin_sig = Signal(0)
 tick_sig = Signal(0)
+detail_sig = Signal("")
 err_sig = Signal("")
 
 state = {
@@ -209,26 +220,51 @@ _keyboard_bound: dict = {}
 
 
 def tracked_select(name: str, options: list, **kw) -> SelectRenderable:
-    """Select list with quiet styling and a cursor that survives re-renders.
+    """Button-like select list: highlight hugs the content with even
+    padding on all sides, quiet styling, cursor surviving re-renders.
 
-    The logo ticker re-evaluates the tree several times a second; without a
-    persistent cursor every rebuild would jump back to the top option.
+    Descriptions render on a dedicated detail line under the list (via
+    detail_sig) instead of inside the rows, so every button keeps the
+    same compact shape. The logo ticker re-evaluates the tree several
+    times a second; without a persistent cursor every rebuild would
+    jump back to the top option.
     """
     for opt in options:
-        if not opt.name.startswith("  "):
-            opt.name = "  " + opt.name
+        label = opt.name.strip()
+        opt.name = f"  {label}  "
     kw.setdefault("selected_background_color", accent())
     kw.setdefault("selected_text_color", TITLE_FG)
     kw.setdefault("description_color", SECONDARY)
     kw.setdefault("item_spacing", 1)
+    kw.setdefault("show_description", False)
+    initial = min(state["cursors"].get(name, 0), max(len(options) - 1, 0))
+
+    def on_move(idx: int, opt) -> None:
+        state["cursors"][name] = idx
+        try:
+            detail_sig.set(getattr(opt, "description", "") or "")
+        except Exception:
+            pass
+
     sel = SelectRenderable(
         options=options,
-        selected_index=min(state["cursors"].get(name, 0), max(len(options) - 1, 0)),
+        selected_index=initial,
+        align_self="flex-start",
         **kw,
     )
-    sel.on("selectionChanged", lambda idx, opt: state["cursors"].update({name: idx}))
+    sel.on("selectionChanged", on_move)
+    try:
+        current = options[initial] if options else None
+        detail_sig.set(getattr(current, "description", "") or "")
+    except Exception:
+        pass
     selects[name] = sel
     return sel
+
+
+def detail_line() -> Text:
+    """Context for the highlighted button; blank keeps the rhythm stable."""
+    return Text(lambda: detail_sig() or " ", fg=SECONDARY)
 
 
 # --------------------------------------------------------------------------
@@ -457,7 +493,7 @@ def App():
         return Box(
             Box(*logo_lines(tick_sig())),
             gap(),
-            frame("Main Menu", sel),
+            frame("Main Menu", sel, detail_line()),
             gap(),
             hint("Up/Down to move, Enter to select, q to quit"),
         )
@@ -529,6 +565,7 @@ def App():
                 "New research (3/3)",
                 Text(f"Query: {short_query(state['query'])}  |  Iterations: {state['max_iter']}"),
                 sel,
+                detail_line(),
                 hint("Up/Down to move, Enter toggles a source, Esc to go back"),
             )
         )
@@ -595,11 +632,12 @@ def App():
             SelectOption("API keys", "set-keys", "NVIDIA + Tavily, stored locally"),
             SelectOption("Research defaults", "set-defaults", "Iterations + results per search"),
             SelectOption("Default sources", "set-sources", f"{on}/{len(active)} enabled"),
+            SelectOption("Setup wizard", "setup-welcome", "Keys, folder, theme from scratch"),
             SelectOption("Back", "back"),
         ])
         sel.on("itemSelected", on_pick)
         return Box(
-            frame("Settings", sel),
+            frame("Settings", sel, detail_line()),
             gap(),
             hint("Up/Down to move, Enter to edit, Esc for menu"),
         )
@@ -616,7 +654,7 @@ def App():
         )
         sel.on("itemSelected", on_pick)
         return Box(
-            frame("Color theme", sel),
+            frame("Color theme", sel, detail_line()),
             gap(),
             hint("Enter to apply, Esc to go back"),
         )
@@ -678,7 +716,7 @@ def App():
         )
         sel.on("itemSelected", on_pick)
         return Box(
-            frame("API keys", sel),
+            frame("API keys", sel, detail_line()),
             gap(),
             hint("Keys are stored only in your local settings file"),
         )
@@ -730,7 +768,7 @@ def App():
         ])
         sel.on("itemSelected", on_pick)
         return Box(
-            frame("Research defaults", sel),
+            frame("Research defaults", sel, detail_line()),
             gap(),
             hint("Enter to edit, Esc to go back"),
         )
@@ -772,9 +810,151 @@ def App():
     if current == "set-sources":
         sel = sources_select(session=False)
         return Box(
-            frame("Default sources", sel),
+            frame("Default sources", sel, detail_line()),
             gap(),
             hint("Enter toggles a source, Esc to go back"),
+        )
+
+    if current == "setup-welcome":
+        def on_pick(index: int, opt) -> None:
+            if (opt.value if opt else None) == "start":
+                state["setup"] = {}
+                err_sig.set("")
+                screen.set("setup-nvidia")
+            else:
+                screen.set("menu")
+
+        sel = tracked_select("setup-welcome", [
+            SelectOption("Continue setup", "start", "Takes about a minute"),
+            SelectOption("Back to menu", "menu", "Finish later via Settings"),
+        ])
+        sel.on("itemSelected", on_pick)
+        return Box(
+            Text("\n".join(banner_lines()), fg=accent()),
+            gap(),
+            frame(
+                "Welcome to Veritas",
+                Text("Three things to get going: an NVIDIA key for the research brain, a Tavily key for web search, and a folder for reports."),
+                Text("Keys are stored only on this machine. Environment variables always win when set.", fg=SECONDARY),
+                gap(),
+                sel,
+                detail_line(),
+            ),
+            gap(),
+            hint("Enter to choose, Esc for menu"),
+        )
+
+    if current in ("setup-nvidia", "setup-tavily"):
+        is_nvidia = current == "setup-nvidia"
+        field = "nvidia_api_key" if is_nvidia else "tavily_api_key"
+        label = "NVIDIA API key" if is_nvidia else "Tavily API key"
+        where = "build.nvidia.com" if is_nvidia else "tavily.com"
+        nxt = "setup-tavily" if is_nvidia else "setup-reports"
+
+        def submit(value: str) -> None:
+            raw = value.strip()
+            if not raw:
+                err_sig.set("Paste a key to continue, or Esc to stop.")
+                return
+            err_sig.set("")
+            state.setdefault("setup", {})[field] = raw
+            screen.set(nxt)
+
+        key_input = Input(
+            placeholder=f"Paste your key from {where}",
+            focused=True,
+            on_submit=submit,
+        )
+        inputs[current] = key_input
+        step = "Setup (1/4)" if is_nvidia else "Setup (2/4)"
+        return Box(
+            frame(
+                step,
+                Text(label, bold=True),
+                Text(f"Get one at {where}.", fg=SECONDARY),
+                key_input,
+                Text(err_sig() or "", fg=DANGER),
+                hint("Enter to continue, Esc to stop"),
+            )
+        )
+
+    if current == "setup-reports":
+        def submit(value: str) -> None:
+            raw = value.strip()
+            if raw:
+                expanded = os.path.expanduser(raw)
+                try:
+                    os.makedirs(expanded, exist_ok=True)
+                except OSError as e:
+                    err_sig.set(f"Cannot use that folder: {e}")
+                    return
+                state.setdefault("setup", {})["reports_dir"] = raw
+            err_sig.set("")
+            screen.set("setup-theme")
+
+        reports_setup_input = Input(
+            value="",
+            placeholder="Empty keeps the default",
+            focused=True,
+            on_submit=submit,
+        )
+        inputs["setup-reports"] = reports_setup_input
+        return Box(
+            frame(
+                "Setup (3/4)",
+                Text("Reports folder", bold=True),
+                Text(f"Default: {reports_dir(settings_sig())}", fg=SECONDARY),
+                reports_setup_input,
+                Text(err_sig() or "", fg=DANGER),
+                hint("Enter to continue, Esc to stop"),
+            )
+        )
+
+    if current == "setup-theme":
+        def on_pick(index: int, opt) -> None:
+            update_settings(
+                nvidia_api_key=state.get("setup", {}).get("nvidia_api_key", ""),
+                tavily_api_key=state.get("setup", {}).get("tavily_api_key", ""),
+                **({"reports_dir": state["setup"]["reports_dir"]} if "reports_dir" in state.get("setup", {}) else {}),
+                theme=opt.value,
+            )
+            settings_sig.set(load_settings())
+            screen.set("setup-done")
+
+        sel = tracked_select(
+            "setup-theme",
+            [SelectOption(name, name) for name in theme.THEMES],
+        )
+        sel.on("itemSelected", on_pick)
+        return Box(
+            frame("Setup (4/4)", Text("Pick a color theme", bold=True), sel, detail_line()),
+            gap(),
+            hint("Enter to finish setup"),
+        )
+
+    if current == "setup-done":
+        def on_pick(index: int, opt) -> None:
+            screen.set("menu")
+
+        s = settings_sig()
+        sel = tracked_select("setup-done", [
+            SelectOption("Start using Veritas", "go", "Back to the main menu"),
+        ])
+        sel.on("itemSelected", on_pick)
+        return Box(
+            frame(
+                "All set",
+                Text("Saved on this machine:", bold=True),
+                Text(f"NVIDIA key  {mask_key(s.get('nvidia_api_key', ''))}", fg=SECONDARY),
+                Text(f"Tavily key  {mask_key(s.get('tavily_api_key', ''))}", fg=SECONDARY),
+                Text(f"Reports     {reports_dir(s)}", fg=SECONDARY),
+                Text(f"Theme       {s.get('theme', '')}", fg=SECONDARY),
+                gap(),
+                sel,
+                detail_line(),
+            ),
+            gap(),
+            hint("Enter for the menu"),
         )
 
     return Box(Text("Unknown screen", fg=DANGER))
@@ -783,6 +963,13 @@ def App():
 def run() -> None:
     """Launch the OpenTUI app (blocking until quit)."""
     pump_stop.clear()
+    # Fresh installs land in the setup wizard; everyone else gets the menu.
+    try:
+        current_settings = load_settings()
+        nvidia_key, tavily_key, _ = resolve_api_keys(current_settings)
+        screen.set("setup-welcome" if not (nvidia_key and tavily_key) else "menu")
+    except Exception:
+        screen.set("menu")
 
     def _ticker() -> None:
         # The banner shimmer lives only on the menu; ticking elsewhere would
