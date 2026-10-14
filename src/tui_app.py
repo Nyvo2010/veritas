@@ -39,6 +39,7 @@ from opentui import (
     component,
     render,
     use_keyboard,
+    use_paste,
     use_renderer,
 )
 
@@ -231,10 +232,10 @@ def screen_box(title: str, *children, enter: str, back: str | None = None) -> Bo
 
 
 def input_frame(title: str, lines: list, inp, enter: str, back: str, kind: str = "Type") -> Box:
-    """Standard skeleton for text-entry screens: prompts, input, inline
-    validation, then the key hint outside the panel."""
+    """Standard skeleton for text-entry screens: prompts, breathing room,
+    input, inline validation, then the key hint outside the panel."""
     return Box(
-        frame(title, *lines, inp, Text(err_sig() or "", fg=DANGER)),
+        frame(title, *lines, gap(), inp, Text(err_sig() or "", fg=DANGER)),
         gap(),
         hint(f"{kind} · Enter {enter} · Esc {back}"),
     )
@@ -314,6 +315,29 @@ inputs: dict = {}
 renderer_ref: dict = {}
 pump_stop = threading.Event()
 _keyboard_bound: dict = {}
+
+
+def _on_paste(event) -> None:
+    """Bracketed paste lands here; forward it to the focused input.
+
+    Module-level so the hook dedup keeps exactly one registration.
+    Newlines collapse to spaces: every input here is single-line.
+    """
+    s = screen()
+    target = inputs.get(s)
+    if s not in INPUT_SCREENS or target is None:
+        return
+    text = getattr(event, "text", "") or ""
+    text = str(text).replace("\r", " ").replace("\n", " ")
+    if not text:
+        return
+    try:
+        if err_sig():
+            err_sig.set("")
+        target.insert_text(text)
+        target._cursor_position = len(target._value)
+    except Exception:
+        pass
 
 
 def tracked_select(name: str, options: list, **kw) -> SelectRenderable:
@@ -615,8 +639,14 @@ def App():
                     or getattr(e, "alt", False)
                     or getattr(e, "meta", False)
                 )
-                if len(key) == 1 and not modifiers:
-                    target.insert_text(key)
+                # Named keys (e.g. space) carry the printable char in
+                # sequence; key alone would miss them and the port's
+                # handle_key mangles printables (lowercases input).
+                char = getattr(e, "sequence", "") or key
+                if len(char) == 1 and char.isprintable() and not modifiers:
+                    if err_sig():
+                        err_sig.set("")
+                    target.insert_text(char)
                 else:
                     target.handle_key(e)
                 try:
@@ -639,6 +669,7 @@ def App():
     if _keyboard_bound.get("renderer") is not current_renderer:
         _keyboard_bound["renderer"] = current_renderer
         use_keyboard(on_key)
+    use_paste(_on_paste)
 
     if current == "menu":
         sel = menu_select()
@@ -713,6 +744,7 @@ def App():
             frame(
                 "New research (3/3)",
                 Text(f"Query: {short_query(state['query'])}  |  Iterations: {state['max_iter']}"),
+                gap(),
                 sel,
             ),
             gap(),
@@ -1170,6 +1202,49 @@ def App():
     return Box(Text("Unknown screen", fg=DANGER))
 
 
+def _reset_terminal() -> None:
+    """Belt-and-braces terminal reset after the renderer tears down.
+
+    OpenTUI's teardown has a known race (echo restored before reporting
+    modes are off) that leaks stray sequences like `997;1n` into the
+    shell. We never use the mouse, so force it off at startup and
+    explicitly disable every reporting mode plus drain leftovers here.
+    """
+    try:
+        sys.stdout.write(
+            "\x1b[?1000l"    # basic mouse tracking
+            "\x1b[?1002l"    # button-event tracking
+            "\x1b[?1003l"    # any-event tracking
+            "\x1b[?1005l"    # utf8 mouse
+            "\x1b[?1006l"    # SGR mouse
+            "\x1b[?1015l"    # urxvt mouse
+            "\x1b[?2004l"    # bracketed paste
+            "\x1b[?1004l"    # focus reporting
+            "\x1b[?25h"      # show cursor
+            "\x1b[?1049l"    # leave alternate screen
+        )
+        sys.stdout.flush()
+    except Exception:
+        pass
+    try:
+        import select as _select
+
+        fd = sys.stdin.fileno()
+        for _ in range(5):
+            try:
+                ready, _, _ = _select.select([fd], [], [], 0.05)
+            except Exception:
+                break
+            if not ready:
+                break
+            try:
+                os.read(fd, 4096)
+            except OSError:
+                break
+    except Exception:
+        pass
+
+
 def run() -> None:
     """Launch the OpenTUI app (blocking until quit)."""
     pump_stop.clear()
@@ -1196,6 +1271,9 @@ def run() -> None:
 
     threading.Thread(target=_ticker, daemon=True).start()
     try:
-        asyncio.run(render(App))
+        # use_mouse=False: nothing here clicks; mouse tracking left on is
+        # exactly what leaks escape garbage into the shell after exit.
+        asyncio.run(render(App, {"use_mouse": False}))
     finally:
         pump_stop.set()
+        _reset_terminal()

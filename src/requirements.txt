@@ -6,3 +6,6 @@ python-dotenv>=1.0.0
 requests>=2.31.0
 nest-asyncio>=1.5.0
 rich>=13.0.0
+# Full TUI (prebuilt wheels: CPython 3.12/3.13). Without it, `veritas`
+# runs the classic Rich CLI instead.
+opentui>=0.1.2
