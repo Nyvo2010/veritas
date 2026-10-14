@@ -450,7 +450,7 @@ def menu_select() -> SelectRenderable:
 
     sel = tracked_select("menu", [
         SelectOption("New research", "new", "Answer a question with deep web research"),
-        SelectOption("Settings", "settings", "Theme, reports folder, API keys, defaults"),
+        SelectOption("Settings", "settings", "Theme, AI provider, defaults"),
         SelectOption("Quit", "quit", "Exit Veritas"),
     ])
     sel.on("itemSelected", on_pick)
@@ -477,7 +477,12 @@ def sources_select(session: bool) -> SelectRenderable:
     options = []
     for name in toggles:
         mark = "●" if toggles[name] else "○"
-        options.append(SelectOption(f"{mark} {name.replace('_', ' ').title()}", name))
+        label = name.replace("_", " ").title()
+        if session:
+            sub = "Included in this run" if toggles[name] else "Skipped"
+        else:
+            sub = "Enabled" if toggles[name] else "Disabled"
+        options.append(SelectOption(f"{mark} {label}", name, sub))
     if session:
         options.append(SelectOption("Start research", "__start__", "Begin with these sources"))
     else:
@@ -514,7 +519,7 @@ def model_screen(name: str, title: str, base_url: str, api_key: str,
         return Box(
             frame(title, Text("Loading models…", fg=SECONDARY)),
             gap(),
-            hint("Esc to go back"),
+            hint("Esc back"),
         )
 
     if not isinstance(res, tuple) or res[0] in ("err", "manual"):
@@ -543,13 +548,14 @@ def model_screen(name: str, title: str, base_url: str, api_key: str,
     options = []
     if allow_default:
         options.append(SelectOption("Keep default", "__default__", DEFAULT_MODEL))
-    options += [SelectOption(mid, mid) for mid in ids]
+    host = endpoint_host(base_url)
+    options += [SelectOption(mid, mid, host) for mid in ids]
     options.append(SelectOption("Type a model id…", "__manual__", "Not listed? Enter it by hand"))
     inputs.pop(name, None)
     sel = tracked_select(name, options)
     sel.on("itemSelected", on_pick)
     selects[name] = sel
-    return screen_box(f"{title} ({len(ids)} found)", sel, enter="use", back="back")
+    return screen_box(f"{title} · {len(ids)} found", sel, enter="use", back="back")
 
 
 def progress_bar() -> str:
@@ -622,7 +628,7 @@ def App():
             return
         if key == "q" and s == "menu":
             renderer_ref.get("r") and renderer_ref["r"].stop()
-        elif key in ("return", "enter") and s == "done":
+        elif key in ("return", "enter") and s in ("done", "setup-done"):
             screen.set("menu")
 
     # Register the global key handler exactly once per renderer. App
@@ -693,7 +699,7 @@ def App():
             "New research (2/3)",
             [
                 Text(f"Query: {short_query(state['query'])}"),
-                Text(f"Max iterations (default {state['max_iter']}, 1-20):"),
+                Text("Max iterations:"),
             ],
             iter_input,
             enter="continue",
@@ -1150,14 +1156,7 @@ def App():
         )
 
     if current == "setup-done":
-        def on_pick(index: int, opt) -> None:
-            screen.set("menu")
-
         s = settings_sig()
-        sel = tracked_select("setup-done", [
-            SelectOption("Start using Veritas", "go", "Back to the main menu"),
-        ])
-        sel.on("itemSelected", on_pick)
         return Box(
             frame(
                 "All set",
@@ -1172,8 +1171,6 @@ def App():
                         ("Theme", str(s.get("theme", "")).title()),
                     ]
                 ),
-                gap(),
-                sel,
             ),
             gap(),
             hint("Enter for the menu"),
