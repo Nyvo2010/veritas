@@ -17,6 +17,7 @@ Falls back to the Rich CLI when opentui cannot be imported.
 """
 
 import asyncio
+import math
 import os
 import queue
 import shutil
@@ -122,11 +123,49 @@ def gap(rows: int = 1) -> Text:
     return Text("\n".join([""] * rows))
 
 
-def frame(title: str, *children, color: str = None) -> Box:
-    bar = color or accent()
+def _hex_to_rgb(value: str) -> tuple:
+    value = value.lstrip("#")
+    return tuple(int(value[i : i + 2], 16) for i in (0, 2, 4))
+
+
+def _rgb_to_hex(rgb: tuple) -> str:
+    return "#{:02x}{:02x}{:02x}".format(*[max(0, min(255, int(c))) for c in rgb])
+
+
+def shade(value: str, factor: float) -> str:
+    """Lighten (factor > 1) or darken (factor < 1) a hex color toward white/black."""
+    r, g, b = _hex_to_rgb(value)
+    if factor >= 1:
+        t = min(factor - 1, 1)
+        r, g, b = r + (255 - r) * t, g + (255 - g) * t, b + (255 - b) * t
+    else:
+        r, g, b = r * factor, g * factor, b * factor
+    return _rgb_to_hex((r, g, b))
+
+
+def logo_lines(tick: int) -> list:
+    """Banner with a slow tonal shimmer: same accent family, top lighter,
+    a soft wave traveling downward. Subtle on purpose."""
+    lines = banner_lines()
+    total = max(len(lines) - 1, 1)
+    base = accent()
+    out = []
+    for i, line in enumerate(lines):
+        vertical = 1.12 - 0.24 * (i / total)  # lighter crown, deeper base
+        wave = 0.5 + 0.5 * math.sin(tick * 0.30 - i * 0.55)
+        out.append(Text(line, fg=shade(base, vertical * (0.94 + 0.12 * wave))))
+    return out
+
+
+def frame(title: str, *children) -> Box:
+    """Quiet panel: bold text label, tinted body, no highlight bar."""
     return Box(
-        Box(Text(title, fg=TITLE_FG, bold=True), bg=bar),
-        Box(*children, bg=PANEL_BG, padding_y=1, padding_x=2),
+        Text(title, bold=True),
+        gap(),
+        *children,
+        bg=PANEL_BG,
+        padding_y=1,
+        padding_x=2,
     )
 
 
@@ -150,6 +189,7 @@ prog_sig = Signal((0.0, 1, "Starting..."))
 phase_sig = Signal("Preparing...")
 elapsed_sig = Signal("0s")
 spin_sig = Signal(0)
+tick_sig = Signal(0)
 err_sig = Signal("")
 
 state = {
@@ -273,6 +313,7 @@ def menu_select() -> SelectRenderable:
         ],
         selected_background_color=accent(),
         selected_text_color=TITLE_FG,
+        item_spacing=1,
         description_color=SECONDARY,
     )
     sel.on("itemSelected", on_pick)
@@ -311,6 +352,7 @@ def sources_select(session: bool) -> SelectRenderable:
         selected_index=min(state["cursor"], len(options) - 1),
         selected_background_color=accent(),
         selected_text_color=TITLE_FG,
+        item_spacing=1,
     )
     sel.on("itemSelected", on_pick)
     sel.on("selectionChanged", lambda idx, opt: state.update(cursor=idx))
@@ -425,7 +467,7 @@ def App():
         sel = menu_select()
         selects["menu"] = sel
         return Box(
-            Text("\n".join(banner_lines()), fg=accent()),
+            Box(*logo_lines(tick_sig())),
             gap(),
             frame("Main Menu", sel),
             gap(),
@@ -568,6 +610,7 @@ def App():
             ],
             selected_background_color=accent(),
             selected_text_color=TITLE_FG,
+            item_spacing=1,
             description_color=SECONDARY,
         )
         sel.on("itemSelected", on_pick)
@@ -590,6 +633,7 @@ def App():
             options=[SelectOption(name, name) for name in theme.THEMES],
             selected_background_color=accent(),
             selected_text_color=TITLE_FG,
+            item_spacing=1,
         )
         sel.on("itemSelected", on_pick)
         selects["set-theme"] = sel
@@ -653,6 +697,7 @@ def App():
             + [SelectOption("Back", "back")],
             selected_background_color=accent(),
             selected_text_color=TITLE_FG,
+            item_spacing=1,
             description_color=SECONDARY,
         )
         sel.on("itemSelected", on_pick)
@@ -710,6 +755,7 @@ def App():
             ],
             selected_background_color=accent(),
             selected_text_color=TITLE_FG,
+            item_spacing=1,
             description_color=SECONDARY,
         )
         sel.on("itemSelected", on_pick)
@@ -764,6 +810,18 @@ def App():
 def run() -> None:
     """Launch the OpenTUI app (blocking until quit)."""
     pump_stop.clear()
+
+    def _ticker() -> None:
+        n = 0
+        while not pump_stop.is_set():
+            try:
+                tick_sig.set(n)
+                n += 1
+            except Exception:
+                break
+            time.sleep(0.15)
+
+    threading.Thread(target=_ticker, daemon=True).start()
     try:
         asyncio.run(render(App))
     finally:
