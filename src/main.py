@@ -24,13 +24,13 @@ from agents.query_analyzer import QueryAnalyzerAgent
 from agents.search_agent import SearchAgent
 from agents.synthesis_agent import SynthesisAgent
 from agents.report_generator import ReportGeneratorAgent
-from utils.nvidia_client import NvidiaClient
+from utils.llm_client import LLMClient
 from utils.tavily_client import TavilySearchClient
 from utils.ui_manager import UIManager
-from settings import load_settings, resolve_api_keys, reports_dir as resolve_reports_dir
+from settings import load_settings, resolve_api_keys, resolve_llm, reports_dir as resolve_reports_dir
 
 from config import (
-    NVIDIA_API_KEY,
+    LLM_API_KEY,
     TAVILY_API_KEY,
     MAX_RESEARCH_ITERATIONS,
 )
@@ -54,7 +54,7 @@ class DeepResearchAgent:
 
     def __init__(
         self,
-        nvidia_api_key: str = NVIDIA_API_KEY,
+        llm_api_key: str = LLM_API_KEY,
         tavily_api_key: str = TAVILY_API_KEY,
         category_toggles: Optional[Dict[str, bool]] = None
     ):
@@ -62,17 +62,19 @@ class DeepResearchAgent:
         Initialize the research agent
 
         Args:
-            nvidia_api_key: API key for NVIDIA NIM (falls back to settings file)
+            llm_api_key: API key for the OpenAI-compatible LLM endpoint (falls back to settings file)
             tavily_api_key: API key for Tavily Search (falls back to settings file)
             category_toggles: Dict controlling which website categories to include
         """
         self._settings = load_settings()
-        file_nvidia, file_tavily, file_base = resolve_api_keys(self._settings)
+        file_llm, file_tavily, file_base = resolve_api_keys(self._settings)
+        llm = resolve_llm(self._settings)
 
         # Initialize clients
-        self.nvidia = NvidiaClient(
-            api_key=(nvidia_api_key or file_nvidia),
-            api_base_url=file_base,
+        self.nvidia = LLMClient(
+            api_key=(llm_api_key or file_llm),
+            api_base_url=llm["base_url"],
+            model=llm["model"],
         )
         self.tavily = TavilySearchClient(api_key=(tavily_api_key or file_tavily))
 

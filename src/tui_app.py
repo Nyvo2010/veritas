@@ -8,7 +8,8 @@ Screens (all keyboard driven):
   run           live spinner + progress bar + scrolling activity log
   done          result stats or error, back to menu
   settings      current values (merged view-config) + editors
-  set-theme / set-reports / set-keys / set-key / set-defaults /
+  set-theme / set-reports / set-provider / set-endpoint / set-llm-key /
+  set-model / set-tavily / set-defaults /
   set-default / set-sources
 
 Research runs in a worker thread via DeepResearchAgent with a QueueUI
@@ -24,6 +25,7 @@ import shutil
 import sys
 import threading
 import time
+from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
 
@@ -41,14 +43,18 @@ from opentui import (
 )
 
 from settings import (
+    DEFAULT_MODEL,
+    DEFAULT_NVIDIA_BASE_URL,
     load_settings,
     mask_key,
     reports_dir,
     resolve_api_keys,
+    resolve_llm,
     update_settings,
 )
 from ui import theme
 from runner_ui import QueueUI
+from utils.llm_client import fetch_models
 from main import DeepResearchAgent
 
 
@@ -74,8 +80,10 @@ LOG_GLYPH = {
 }
 
 INPUT_SCREENS = {
-    "query", "iterations", "set-reports", "set-key", "set-default",
-    "setup-nvidia", "setup-tavily", "setup-reports",
+    "query", "iterations", "set-reports", "set-endpoint", "set-llm-key",
+    "set-model", "set-tavily", "set-default",
+    "setup-endpoint", "setup-llm-key", "setup-model", "setup-tavily",
+    "setup-reports",
 }
 
 BACK = {
@@ -87,14 +95,19 @@ BACK = {
     "settings": "menu",
     "set-theme": "settings",
     "set-reports": "settings",
-    "set-keys": "settings",
-    "set-key": "set-keys",
+    "set-provider": "settings",
+    "set-endpoint": "set-provider",
+    "set-llm-key": "set-provider",
+    "set-model": "set-provider",
+    "set-tavily": "settings",
     "set-defaults": "settings",
     "set-default": "set-defaults",
     "set-sources": "settings",
     "setup-welcome": "menu",
-    "setup-nvidia": "setup-welcome",
-    "setup-tavily": "setup-nvidia",
+    "setup-endpoint": "setup-welcome",
+    "setup-llm-key": "setup-endpoint",
+    "setup-model": "setup-llm-key",
+    "setup-tavily": "setup-model",
     "setup-reports": "setup-tavily",
     "setup-theme": "setup-reports",
     "setup-done": None,
@@ -233,6 +246,38 @@ def kv_rows(pairs: list) -> list:
     return [Text(f"{label:<{width}}  {value}", fg=SECONDARY) for label, value in pairs]
 
 
+def endpoint_host(url: str) -> str:
+    """Short host for display; falls back to the raw URL."""
+    try:
+        return urlparse(url or "").netloc or str(url or "")
+    except Exception:
+        return str(url or "")
+
+
+def provider_blurb(s=None) -> str:
+    """One-line summary of the AI provider: model @ host."""
+    llm = resolve_llm(s if s is not None else settings_sig())
+    return f"{llm['model']} @ {endpoint_host(llm['base_url'])}"
+
+
+def kick_model_fetch(base_url: str, api_key: str) -> None:
+    """Fetch /models once per endpoint+key; results land in models_sig."""
+    tag = f"{base_url}\n{api_key}"
+    if state.get("model_fetch_for") == tag and models_sig() is not None:
+        return
+    state["model_fetch_for"] = tag
+    models_sig.set(None)
+
+    def _go() -> None:
+        try:
+            ids = fetch_models(base_url, api_key)
+            models_sig.set(("ok", ids))
+        except Exception as e:  # noqa: BLE001 - surfaced as helper text
+            models_sig.set(("err", str(e)))
+
+    threading.Thread(target=_go, daemon=True).start()
+
+
 def short_query(q: str, n: int = 70) -> str:
     q = " ".join(q.split())
     return q if len(q) <= n else q[: n - 3] + "..."
@@ -251,13 +296,14 @@ elapsed_sig = Signal("0s")
 spin_sig = Signal(0)
 tick_sig = Signal(0)
 err_sig = Signal("")
+# None = loading, ("ok", [ids]) | ("err", message) | ("manual", "")
+models_sig = Signal(None)
 
 state = {
     "query": "",
     "max_iter": 10,
     "toggles": {},
     "cursors": {},
-    "key_field": "",
     "default_field": "",
     "result": None,
     "run_start": 0.0,
@@ -445,6 +491,67 @@ def sources_select(session: bool) -> SelectRenderable:
 toggles_sig = Signal({})
 
 
+def model_screen(name: str, title: str, base_url: str, api_key: str,
+                 current_model: str, commit, allow_default: bool = False) -> Box:
+    """Model picker with autodetect: lists /models when reachable,
+    otherwise falls back to manual entry with the fetch error shown.
+    commit(model_id) saves and navigates; commit(None) keeps current."""
+    kick_model_fetch(base_url, api_key)
+    res = models_sig()
+
+    def submit(value: str) -> None:
+        raw = value.strip()
+        if not raw:
+            if allow_default:
+                commit(None)
+                return
+            err_sig.set("Type a model id, or Esc to go back.")
+            return
+        err_sig.set("")
+        commit(raw)
+
+    if res is None:
+        return Box(
+            frame(title, Text("Loading models…", fg=SECONDARY)),
+            gap(),
+            hint("Esc to go back"),
+        )
+
+    if not isinstance(res, tuple) or res[0] in ("err", "manual"):
+        manual_input = make_input(
+            value="",
+            placeholder="Model id (empty keeps current)",
+            on_submit=submit,
+        )
+        inputs[name] = manual_input
+        selects.pop(name, None)
+        lines = [Text(f"Current: {current_model}")]
+        if isinstance(res, tuple) and res[0] == "err":
+            lines.append(Text(f"Could not list models: {res[1]}", fg=DANGER))
+        return input_frame(title, lines, manual_input, enter="save", back="back")
+
+    _, ids = res
+
+    def on_pick(index: int, opt) -> None:
+        value = opt.value if opt else None
+        err_sig.set("")
+        if value == "__manual__":
+            models_sig.set(("manual", ""))
+        else:
+            commit(None if value == "__default__" else value)
+
+    options = []
+    if allow_default:
+        options.append(SelectOption("Keep default", "__default__", DEFAULT_MODEL))
+    options += [SelectOption(mid, mid) for mid in ids]
+    options.append(SelectOption("Type a model id…", "__manual__", "Not listed? Enter it by hand"))
+    inputs.pop(name, None)
+    sel = tracked_select(name, options)
+    sel.on("itemSelected", on_pick)
+    selects[name] = sel
+    return screen_box(f"{title} ({len(ids)} found)", sel, enter="use", back="back")
+
+
 def progress_bar() -> str:
     completed, total, _ = prog_sig()
     ratio = min(1.0, completed / total) if total else 0.0
@@ -482,7 +589,7 @@ def App():
                 err_sig.set("")
                 screen.set(target)
             return
-        if s in selects and s not in INPUT_SCREENS:
+        if s in selects and (s not in INPUT_SCREENS or s not in inputs):
             try:
                 if selects[s].handle_key(e):
                     return
@@ -665,7 +772,8 @@ def App():
         sel = tracked_select("settings", [
             SelectOption("Color theme", "set-theme", f"Current: {s.get('theme', '').title()}"),
             SelectOption("Reports folder", "set-reports", reports_dir(s)),
-            SelectOption("API keys", "set-keys", "NVIDIA + Tavily, stored locally"),
+            SelectOption("AI provider", "set-provider", provider_blurb(s)),
+            SelectOption("Search API", "set-tavily", f"Tavily key {mask_key(s.get('tavily_api_key', ''))}"),
             SelectOption("Research defaults", "set-defaults", "Iterations + results per search"),
             SelectOption("Default sources", "set-sources", f"{on}/{len(active)} enabled"),
             SelectOption("Setup wizard", "setup-welcome", "Keys, folder, theme from scratch"),
@@ -715,57 +823,101 @@ def App():
             back="back",
         )
 
-    if current == "set-keys":
+    if current == "set-provider":
         def on_pick(index: int, opt) -> None:
             value = opt.value if opt else None
             if value == "back":
                 screen.set("settings")
             else:
-                state["key_field"] = value
                 err_sig.set("")
-                screen.set("set-key")
+                screen.set(value)
 
-        s = settings_sig()
-        labels = {
-            "nvidia_api_key": ("NVIDIA API key", mask_key(s.get("nvidia_api_key", ""))),
-            "tavily_api_key": ("Tavily API key", mask_key(s.get("tavily_api_key", ""))),
-            "nvidia_api_base_url": ("Base URL", str(s.get("nvidia_api_base_url", ""))),
-        }
-        sel = tracked_select(
-            "set-keys",
-            [SelectOption(label, key, current) for key, (label, current) in labels.items()]
-            + [SelectOption("Back", "back", "Settings")],
-        )
+        llm = resolve_llm(settings_sig())
+        sel = tracked_select("set-provider", [
+            SelectOption("Endpoint", "set-endpoint", llm["base_url"]),
+            SelectOption("API key", "set-llm-key", f"Key {mask_key(llm['api_key'])}"),
+            SelectOption("Model", "set-model", llm["model"]),
+            SelectOption("Back", "back", "Settings"),
+        ])
         sel.on("itemSelected", on_pick)
         return screen_box(
-            "API keys",
-            Text("Keys are stored only in your local settings file.", fg=SECONDARY),
+            "AI provider",
+            Text("Any OpenAI-compatible endpoint works.", fg=SECONDARY),
             sel,
             enter="edit",
             back="back",
         )
 
-    if current == "set-key":
-        field = state["key_field"]
-        label = {
-            "nvidia_api_key": "NVIDIA API key",
-            "tavily_api_key": "Tavily API key",
-            "nvidia_api_base_url": "Base URL",
-        }.get(field, field)
+    if current == "set-endpoint":
+        def submit(value: str) -> None:
+            raw = value.strip().rstrip("/")
+            if not raw:
+                screen.set("set-provider")
+                return
+            parsed = urlparse(raw)
+            if not parsed.scheme or not parsed.netloc:
+                err_sig.set("Enter a full URL with scheme and host.")
+                return
+            err_sig.set("")
+            update_settings(llm_base_url=raw)
+            settings_sig.set(load_settings())
+            screen.set("set-provider")
 
+        endpoint_input = make_input(
+            value="",
+            placeholder="Endpoint URL (empty keeps current)",
+            on_submit=submit,
+        )
+        inputs["set-endpoint"] = endpoint_input
+        return input_frame(
+            "Endpoint",
+            [Text(f"Current: {resolve_llm(settings_sig())['base_url']}")],
+            endpoint_input,
+            enter="save",
+            back="back",
+        )
+
+    if current == "set-llm-key":
         def submit(value: str) -> None:
             raw = value.strip()
             if raw:
-                update_settings(**{field: raw})
+                update_settings(llm_api_key=raw)
                 settings_sig.set(load_settings())
-            screen.set("set-keys")
+            screen.set("set-provider")
 
-        key_input = make_input(
-            placeholder="Paste a new value, Enter to save",
+        llm_key_input = make_input(
+            placeholder="Paste a new key, Enter to save",
             on_submit=submit,
         )
-        inputs["set-key"] = key_input
-        return input_frame(label, [], key_input, enter="save", back="back", kind="Paste")
+        inputs["set-llm-key"] = llm_key_input
+        return input_frame("API key", [], llm_key_input, enter="save", back="back", kind="Paste")
+
+    if current == "set-model":
+        llm = resolve_llm(settings_sig())
+
+        def commit(model: str | None) -> None:
+            if model:
+                update_settings(llm_model=model)
+                settings_sig.set(load_settings())
+            err_sig.set("")
+            screen.set("set-provider")
+
+        return model_screen("set-model", "AI model", llm["base_url"], llm["api_key"], llm["model"], commit)
+
+    if current == "set-tavily":
+        def submit(value: str) -> None:
+            raw = value.strip()
+            if raw:
+                update_settings(tavily_api_key=raw)
+                settings_sig.set(load_settings())
+            screen.set("settings")
+
+        tavily_input = make_input(
+            placeholder="Paste a new key, Enter to save",
+            on_submit=submit,
+        )
+        inputs["set-tavily"] = tavily_input
+        return input_frame("Tavily API key", [], tavily_input, enter="save", back="back", kind="Paste")
 
     if current == "set-defaults":
         def on_pick(index: int, opt) -> None:
@@ -828,7 +980,7 @@ def App():
             if (opt.value if opt else None) == "start":
                 state["setup"] = {}
                 err_sig.set("")
-                screen.set("setup-nvidia")
+                screen.set("setup-endpoint")
             else:
                 screen.set("menu")
 
@@ -842,8 +994,8 @@ def App():
             gap(),
             frame(
                 "Welcome to Veritas",
-                Text("Three things to get going: an NVIDIA key for the research brain, a Tavily key for web search, and a folder for reports."),
-                Text("Keys are stored only on this machine. Environment variables always win when set.", fg=SECONDARY),
+                Text("Three things to get going: an API key for the AI brain, a Tavily key for web search, and a folder for reports."),
+                Text("Any OpenAI-compatible endpoint works. Keys are stored only on this machine.", fg=SECONDARY),
                 gap(),
                 sel,
             ),
@@ -851,32 +1003,94 @@ def App():
             hint("↑↓ move · Enter choose · Esc menu"),
         )
 
-    if current in ("setup-nvidia", "setup-tavily"):
-        is_nvidia = current == "setup-nvidia"
-        field = "nvidia_api_key" if is_nvidia else "tavily_api_key"
-        label = "NVIDIA API key" if is_nvidia else "Tavily API key"
-        where = "build.nvidia.com" if is_nvidia else "tavily.com"
-        nxt = "setup-tavily" if is_nvidia else "setup-reports"
+    if current == "setup-endpoint":
+        def submit(value: str) -> None:
+            raw = value.strip().rstrip("/") or DEFAULT_NVIDIA_BASE_URL
+            parsed = urlparse(raw)
+            if not parsed.scheme or not parsed.netloc:
+                err_sig.set("Enter a full URL with scheme and host.")
+                return
+            err_sig.set("")
+            state.setdefault("setup", {})["llm_base_url"] = raw
+            screen.set("setup-llm-key")
 
+        endpoint_setup_input = make_input(
+            value="",
+            placeholder="Endpoint URL (empty keeps NVIDIA)",
+            on_submit=submit,
+        )
+        inputs["setup-endpoint"] = endpoint_setup_input
+        return input_frame(
+            "Setup (1/6)",
+            [
+                Text("AI endpoint", bold=True),
+                Text("Any OpenAI-compatible base URL. NVIDIA is the default.", fg=SECONDARY),
+            ],
+            endpoint_setup_input,
+            enter="continue",
+            back="stop",
+        )
+
+    if current == "setup-llm-key":
         def submit(value: str) -> None:
             raw = value.strip()
             if not raw:
                 err_sig.set("Paste a key to continue, or Esc to stop.")
                 return
             err_sig.set("")
-            state.setdefault("setup", {})[field] = raw
-            screen.set(nxt)
+            state.setdefault("setup", {})["llm_api_key"] = raw
+            screen.set("setup-model")
 
-        key_input = make_input(
-            placeholder=f"Paste your key from {where}",
+        llm_setup_input = make_input(
+            placeholder="Paste your key for the endpoint above",
             on_submit=submit,
         )
-        inputs[current] = key_input
-        step = "Setup (1/4)" if is_nvidia else "Setup (2/4)"
+        inputs["setup-llm-key"] = llm_setup_input
         return input_frame(
-            step,
-            [Text(label, bold=True), Text(f"Get one at {where}.", fg=SECONDARY)],
-            key_input,
+            "Setup (2/6)",
+            [Text("API key", bold=True)],
+            llm_setup_input,
+            enter="continue",
+            back="stop",
+            kind="Paste",
+        )
+
+    if current == "setup-model":
+        setup = state.get("setup", {})
+        base_url = setup.get("llm_base_url", DEFAULT_NVIDIA_BASE_URL)
+        api_key = setup.get("llm_api_key", "")
+
+        def commit(model: str | None) -> None:
+            if model:
+                state.setdefault("setup", {})["llm_model"] = model
+            err_sig.set("")
+            screen.set("setup-tavily")
+
+        return model_screen(
+            "setup-model", "Setup (3/6)", base_url, api_key,
+            setup.get("llm_model") or resolve_llm(settings_sig())["model"],
+            commit, allow_default=True,
+        )
+
+    if current == "setup-tavily":
+        def submit(value: str) -> None:
+            raw = value.strip()
+            if not raw:
+                err_sig.set("Paste a key to continue, or Esc to stop.")
+                return
+            err_sig.set("")
+            state.setdefault("setup", {})["tavily_api_key"] = raw
+            screen.set("setup-reports")
+
+        tavily_setup_input = make_input(
+            placeholder="Paste your key from tavily.com",
+            on_submit=submit,
+        )
+        inputs["setup-tavily"] = tavily_setup_input
+        return input_frame(
+            "Setup (4/6)",
+            [Text("Tavily API key", bold=True)],
+            tavily_setup_input,
             enter="continue",
             back="stop",
             kind="Paste",
@@ -903,7 +1117,7 @@ def App():
         )
         inputs["setup-reports"] = reports_setup_input
         return input_frame(
-            "Setup (3/4)",
+            "Setup (5/6)",
             [
                 Text("Reports folder", bold=True),
                 Text(f"Default: {reports_dir(settings_sig())}", fg=SECONDARY),
@@ -915,10 +1129,13 @@ def App():
 
     if current == "setup-theme":
         def on_pick(index: int, opt) -> None:
+            setup = state.get("setup", {})
             update_settings(
-                nvidia_api_key=state.get("setup", {}).get("nvidia_api_key", ""),
-                tavily_api_key=state.get("setup", {}).get("tavily_api_key", ""),
-                **({"reports_dir": state["setup"]["reports_dir"]} if "reports_dir" in state.get("setup", {}) else {}),
+                llm_api_key=setup.get("llm_api_key", ""),
+                llm_base_url=setup.get("llm_base_url", DEFAULT_NVIDIA_BASE_URL),
+                **({"llm_model": setup["llm_model"]} if setup.get("llm_model") else {}),
+                tavily_api_key=setup.get("tavily_api_key", ""),
+                **({"reports_dir": setup["reports_dir"]} if "reports_dir" in setup else {}),
                 theme=opt.value,
             )
             settings_sig.set(load_settings())
@@ -927,7 +1144,7 @@ def App():
         sel = tracked_select("setup-theme", theme_options())
         sel.on("itemSelected", on_pick)
         return Box(
-            frame("Setup (4/4)", Text("Pick a color theme", bold=True), sel),
+            frame("Setup (6/6)", Text("Pick a color theme", bold=True), sel),
             gap(),
             hint("↑↓ move · Enter finish · Esc back"),
         )
@@ -947,7 +1164,9 @@ def App():
                 Text("Saved on this machine:", bold=True),
                 *kv_rows(
                     [
-                        ("NVIDIA key", mask_key(s.get("nvidia_api_key", ""))),
+                        ("Endpoint", str(s.get("llm_base_url", ""))),
+                        ("Model", str(s.get("llm_model", ""))),
+                        ("LLM key", mask_key(s.get("llm_api_key", ""))),
                         ("Tavily key", mask_key(s.get("tavily_api_key", ""))),
                         ("Reports", reports_dir(s)),
                         ("Theme", str(s.get("theme", "")).title()),

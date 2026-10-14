@@ -93,31 +93,32 @@ def keys_menu(console: Console, settings: dict) -> dict:
         clear_screen()
         screens.print_header(console, "Settings - API Keys")
         screens.kv_panel(console, "Keys (secrets stay in your settings file)", [
-            ("[1] NVIDIA", mask_key(settings.get("nvidia_api_key", ""))),
-            ("[2] Tavily", mask_key(settings.get("tavily_api_key", ""))),
-            ("[3] Base URL", str(settings.get("nvidia_api_base_url", ""))),
+            ("[1] LLM key", mask_key(settings.get("llm_api_key", "") or settings.get("nvidia_api_key", ""))),
+            ("[2] Endpoint", str(settings.get("llm_base_url", ""))),
+            ("[3] Model", str(settings.get("llm_model", ""))),
+            ("[4] Tavily", mask_key(settings.get("tavily_api_key", ""))),
         ])
         console.print("Keys typed here overwrite the settings file. Environment variables still take precedence.")
         console.print()
         choice = Prompt.ask(
-            f"[{theme.PRIMARY}]Pick 1-3, 'clear' to wipe keys, or Enter to go back[/{theme.PRIMARY}]",
+            f"[{theme.PRIMARY}]Pick 1-4, 'clear' to wipe keys, or Enter to go back[/{theme.PRIMARY}]",
             default="", show_default=False,
         ).strip().lower()
         if choice == "":
             return settings
         if choice == "clear":
-            settings = update_settings(nvidia_api_key="", tavily_api_key="")
+            settings = update_settings(llm_api_key="", tavily_api_key="")
             screens.print_panel(console, "Stored keys cleared.", "Saved", style=theme.SUCCESS)
             pause(console)
             return settings
-        if choice in ("1", "2", "3"):
-            label = {"1": "NVIDIA API key", "2": "Tavily API key", "3": "NVIDIA base URL"}[choice]
+        if choice in ("1", "2", "3", "4"):
+            label = {"1": "LLM API key", "2": "Endpoint base URL", "3": "Model id", "4": "Tavily API key"}[choice]
             value = Prompt.ask(
                 f"[{theme.PRIMARY}]{label}[/{theme.PRIMARY}]",
                 default="", show_default=False,
             ).strip()
             if value:
-                key = {"1": "nvidia_api_key", "2": "tavily_api_key", "3": "nvidia_api_base_url"}[choice]
+                key = {"1": "llm_api_key", "2": "llm_base_url", "3": "llm_model", "4": "tavily_api_key"}[choice]
                 settings = update_settings(**{key: value})
                 screens.print_panel(console, f"{label} saved.", "Saved", style=theme.SUCCESS)
                 pause(console)
@@ -195,7 +196,9 @@ def settings_menu(console: Console, settings: dict) -> dict:
             ("File", settings_path()),
             ("Theme", str(settings.get("theme", ""))),
             ("Reports", reports_dir(settings)),
-            ("NVIDIA key", mask_key(settings.get("nvidia_api_key", ""))),
+            ("LLM key", mask_key(settings.get("llm_api_key", "") or settings.get("nvidia_api_key", ""))),
+            ("Endpoint", str(settings.get("llm_base_url", ""))),
+            ("Model", str(settings.get("llm_model", ""))),
             ("Tavily key", mask_key(settings.get("tavily_api_key", ""))),
         ])
         screens.menu_panel(console, options)
@@ -215,17 +218,18 @@ def settings_menu(console: Console, settings: dict) -> dict:
 
 
 def view_config(console: Console, agent: DeepResearchAgent, settings: dict):
-    from config import NVIDIA_MODEL, MAX_PARALLEL_SECTIONS
+    from config import MAX_PARALLEL_SECTIONS
 
     clear_screen()
     screens.print_header(console, "Configuration")
     screens.kv_panel(console, "System", [
-        ("Model", NVIDIA_MODEL),
+        ("Model", agent.nvidia.model),
+        ("Endpoint", str(settings.get("llm_base_url", ""))),
         ("Parallel sections", str(MAX_PARALLEL_SECTIONS)),
         ("Theme", str(settings.get("theme", ""))),
         ("Reports folder", reports_dir(settings)),
         ("Settings file", settings_path()),
-        ("NVIDIA key", mask_key(settings.get("nvidia_api_key", ""))),
+        ("LLM key", mask_key(settings.get("llm_api_key", "") or settings.get("nvidia_api_key", ""))),
         ("Tavily key", mask_key(settings.get("tavily_api_key", ""))),
         ("Default iterations", str(settings.get("max_iterations", 10))),
     ])

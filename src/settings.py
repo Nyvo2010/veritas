@@ -26,13 +26,15 @@ except ImportError:  # pragma: no cover - dotenv is a hard dependency in practic
 load_dotenv()
 
 DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+DEFAULT_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
 
 DEFAULTS: Dict[str, Any] = {
     "theme": "cyan",
     "reports_dir": os.path.join(os.path.expanduser("~"), "Veritas", "reports"),
-    "nvidia_api_key": "",
+    "llm_api_key": "",
+    "llm_base_url": DEFAULT_NVIDIA_BASE_URL,
+    "llm_model": DEFAULT_MODEL,
     "tavily_api_key": "",
-    "nvidia_api_base_url": DEFAULT_NVIDIA_BASE_URL,
     "max_iterations": 10,
     "max_search_results": 15,
     "category_toggles": {
@@ -43,6 +45,10 @@ DEFAULTS: Dict[str, Any] = {
         "general": True,
     },
 }
+
+# Pre-generic-provider keys. Still honored on load (migrated in memory),
+# but no longer written back to disk.
+LEGACY_KEYS = ("nvidia_api_key", "nvidia_api_base_url")
 
 
 def settings_dir() -> str:
@@ -59,6 +65,7 @@ def settings_path() -> str:
 def load_settings() -> Dict[str, Any]:
     """Load settings from disk, merged over defaults. Never raises."""
     merged = deepcopy(DEFAULTS)
+    stored: Dict[str, Any] = {}
     try:
         with open(settings_path(), "r", encoding="utf-8") as f:
             stored = json.load(f)
@@ -70,6 +77,12 @@ def load_settings() -> Dict[str, Any]:
                     merged[key] = value
     except (OSError, ValueError):
         pass
+    # One-time migration from the NVIDIA-only era.
+    if isinstance(stored, dict):
+        if not merged.get("llm_api_key") and stored.get("nvidia_api_key"):
+            merged["llm_api_key"] = stored["nvidia_api_key"]
+        if stored.get("nvidia_api_base_url") and merged.get("llm_base_url") in (DEFAULT_NVIDIA_BASE_URL, ""):
+            merged["llm_base_url"] = stored["nvidia_api_base_url"]
     return merged
 
 
@@ -102,22 +115,35 @@ def update_settings(**kwargs: Any) -> Dict[str, Any]:
     return current
 
 
-def resolve_api_keys(settings: Dict[str, Any] = None) -> Tuple[str, str, str]:
-    """Resolve (nvidia_key, tavily_key, base_url) with env-over-file precedence."""
+def resolve_llm(settings: Dict[str, Any] = None) -> Dict[str, str]:
+    """Resolve the LLM endpoint config: env (LLM_* then NVIDIA_*) wins over file."""
     settings = settings if settings is not None else load_settings()
-    nvidia_key = (
-        os.environ.get("NVIDIA_API_KEY", "").strip()
-        or str(settings.get("nvidia_api_key", "")).strip()
+    api_key = (
+        os.environ.get("LLM_API_KEY", "").strip()
+        or os.environ.get("NVIDIA_API_KEY", "").strip()
+        or str(settings.get("llm_api_key", "") or settings.get("nvidia_api_key", "")).strip()
     )
+    base_url = (
+        os.environ.get("LLM_BASE_URL", "").strip()
+        or os.environ.get("NVIDIA_API_BASE_URL", "").strip()
+        or str(settings.get("llm_base_url", "") or settings.get("nvidia_api_base_url", "") or DEFAULT_NVIDIA_BASE_URL).strip()
+    )
+    model = (
+        os.environ.get("LLM_MODEL", "").strip()
+        or str(settings.get("llm_model", "") or DEFAULT_MODEL).strip()
+    )
+    return {"api_key": api_key, "base_url": base_url, "model": model}
+
+
+def resolve_api_keys(settings: Dict[str, Any] = None) -> Tuple[str, str, str]:
+    """Resolve (llm_key, tavily_key, base_url) with env-over-file precedence."""
+    settings = settings if settings is not None else load_settings()
+    llm = resolve_llm(settings)
     tavily_key = (
         os.environ.get("TAVILY_API_KEY", "").strip()
         or str(settings.get("tavily_api_key", "")).strip()
     )
-    base_url = (
-        os.environ.get("NVIDIA_API_BASE_URL", "").strip()
-        or str(settings.get("nvidia_api_base_url", "") or DEFAULT_NVIDIA_BASE_URL).strip()
-    )
-    return nvidia_key, tavily_key, base_url
+    return llm["api_key"], tavily_key, llm["base_url"]
 
 
 def mask_key(value: str) -> str:
