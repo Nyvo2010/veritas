@@ -9,6 +9,8 @@ variable (.env supported) > settings file > built-in default.
 
 The file holds secrets (API keys), so it is created with mode 0o600
 on POSIX systems.
+
+Optional: VERITAS_REPORTS_DIR to override the reports directory.
 """
 
 import json
@@ -157,4 +159,7 @@ def mask_key(value: str) -> str:
 def reports_dir(settings: Dict[str, Any] = None) -> str:
     """Resolved reports directory, expanded and created on demand by callers."""
     settings = settings if settings is not None else load_settings()
+    override = os.environ.get("VERITAS_REPORTS_DIR", "").strip()
+    if override:
+        return os.path.expanduser(override)
     return os.path.expanduser(str(settings.get("reports_dir") or DEFAULTS["reports_dir"]))
