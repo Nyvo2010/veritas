@@ -232,10 +232,23 @@ def screen_box(title: str, *children, enter: str, back: str | None = None) -> Bo
 
 
 def input_frame(title: str, lines: list, inp, enter: str, back: str, kind: str = "Type") -> Box:
-    """Standard skeleton for text-entry screens: prompts, breathing room,
-    input, inline validation, then the key hint outside the panel."""
+    """Standard skeleton for text-entry screens: prompts, vertical breathing
+    room (one blank line between each block), input, inline validation,
+    then the key hint outside the panel."""
+    # Build the interior: title/text lines + one blank line + input + error
+    interior: list = []
+    for i, line in enumerate(lines):
+        interior.append(line)
+        # blank line after every block except the last
+        if i < len(lines) - 1:
+            interior.append(gap())
+    interior.extend([
+        gap(),
+        inp,
+        Text(err_sig() or "", fg=DANGER),
+    ])
     return Box(
-        frame(title, *lines, gap(), inp, Text(err_sig() or "", fg=DANGER)),
+        frame(title, *interior),
         gap(),
         hint(f"{kind} · Enter {enter} · Esc {back}"),
     )
