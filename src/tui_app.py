@@ -846,13 +846,7 @@ def App():
             SelectOption("Back", "back", "Settings"),
         ])
         sel.on("itemSelected", on_pick)
-        return screen_box(
-            "AI provider",
-            Text("Any OpenAI-compatible endpoint works.", fg=SECONDARY),
-            sel,
-            enter="edit",
-            back="back",
-        )
+        return screen_box("AI provider", sel, enter="edit", back="back")
 
     if current == "set-endpoint":
         def submit(value: str) -> None:
@@ -871,7 +865,7 @@ def App():
 
         endpoint_input = make_input(
             value="",
-            placeholder="Endpoint URL (empty keeps current)",
+            placeholder="Any OpenAI-compatible URL (empty keeps current)",
             on_submit=submit,
         )
         inputs["set-endpoint"] = endpoint_input
@@ -1022,16 +1016,13 @@ def App():
 
         endpoint_setup_input = make_input(
             value="",
-            placeholder="Endpoint URL (empty keeps NVIDIA)",
+            placeholder="Any OpenAI-compatible URL (empty keeps NVIDIA)",
             on_submit=submit,
         )
         inputs["setup-endpoint"] = endpoint_setup_input
         return input_frame(
             "Setup (1/6)",
-            [
-                Text("AI endpoint", bold=True),
-                Text("Any OpenAI-compatible base URL. NVIDIA is the default.", fg=SECONDARY),
-            ],
+            [Text("AI endpoint", bold=True)],
             endpoint_setup_input,
             enter="continue",
             back="stop",
