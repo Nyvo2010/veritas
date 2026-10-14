@@ -350,11 +350,12 @@ def tracked_select(name: str, options: list, **kw) -> SelectRenderable:
     persistent cursor every rebuild would jump back to the top option.
     """
     for opt in options:
-        opt.name = f"  {str(opt.name).strip()}  "
+        label = str(opt.name).strip()
+        opt.name = f" {label} "
         subtitle = str(getattr(opt, "description", "") or "").strip()
         if len(subtitle) > SUBTITLE_LEN:
             subtitle = subtitle[: SUBTITLE_LEN - 1] + "…"
-        opt.description = f"  {subtitle}" if subtitle else ""
+        opt.description = f" {subtitle}" if subtitle else ""
     kw.setdefault("selected_background_color", accent())
     kw.setdefault("selected_text_color", TITLE_FG)
     kw.setdefault("selected_description_color", TITLE_FG)
