@@ -19,16 +19,17 @@ MUTED = "dim white"
 PANEL_BOX = box.ROUNDED
 PANEL_PADDING = (0, 2)
 
-# Compact static wordmark that replaces the old animated noise banner.
-# Small, cheap to render, never resizes or animates.
+# Static VERITAS wordmark. Never animates, never resizes mid-run.
 COMPACT_LOGO = [
-    " __   __  _______  ______    ___   _______  _______  _______ ",
-    "|  | |  ||       ||    _ |  |   | |       ||   _   ||       |",
-    "|  |_|  ||    ___||   | ||  |   | |_     _||  |_|  ||  _____|",
-    "|       ||   |___ |   |_| ||   |   | |   |  |       || |_____ ",
-    "|       ||    ___||    __ ||   |___| |   |  |       ||_____  |",
-    " |     | |   |___ |   |  ||       | |   |  |   _   | _____| |",
-    "  |___|  |_______||___|  ||_______| |___|  |__| |__||_______|",
+    ".sSSS s.",
+    "SSSSS SSSs. .sSSSSs.    .sSSSSSSSs. SSSSS .sSSSSSSSSSSSSSs. .sSSSSs.    .sSSSSSSSs.",
+    "S SSS SSSSS S SSSSSSSs. S SSS SSSSS S SSS SSSSS S SSS SSSSS S SSSSSSSs. S SSS SSSS'",
+    "S  SS SSSSS S  SS SSSS' S  SS SSSS' S  SS SSSSS S  SS SSSSS S  SS SSSSS S  SS",
+    "S..SS SSSSS S..SS       S..SSsSSSa. S..SS `:S:' S..SS `:S:' S..SSsSSSSS `SSSSsSSSa.",
+    " S::S SSSS  S:::SSSS    S:::S SSSSS S:::S       S:::S       S:::S SSSSS .sSSS SSSSS",
+    "  S;S SSS   S;;;S       S;;;S SSSSS S;;;S       S;;;S       S;;;S SSSSS S;;;S SSSSS",
+    "   SS SS    S%%%S SSSSS S%%%S SSSSS S%%%S       S%%%S       S%%%S SSSSS S%%%S SSSSS",
+    "    SsS     SSSSSsSS;:' SSSSS SSSSS SSSSS       SSSSS       SSSSS SSSSS SSSSSsSSSSS",
 ]
 
 LOGO_SUBTITLE = "Deep Research Agent"

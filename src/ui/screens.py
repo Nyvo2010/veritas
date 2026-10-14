@@ -18,7 +18,8 @@ from ui import theme
 
 
 def print_header(console: Console, subtitle: Optional[str] = None) -> None:
-    logo = Text("\n".join(theme.COMPACT_LOGO), style=f"bold {theme.PRIMARY}")
+    # no_wrap keeps wide ASCII art intact instead of reflowing it.
+    logo = Text("\n".join(theme.COMPACT_LOGO), style=f"bold {theme.PRIMARY}", no_wrap=True)
     title = theme.LOGO_SUBTITLE if subtitle is None else f"{theme.LOGO_SUBTITLE} — {subtitle}"
     console.print(
         Panel(
