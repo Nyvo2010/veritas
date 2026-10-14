@@ -96,6 +96,3 @@ class UIManager:
         elif style in ("yellow", "dim yellow"):
             level = "warn"
         self._renderer.log(level, text)
-
-    def add_section(self, title: str, content: str, style: str = "white") -> None:
-        self._renderer.log("info", f"{title}: {content}")

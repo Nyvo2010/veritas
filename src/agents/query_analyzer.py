@@ -224,13 +224,3 @@ Return JSON:
                 ui_manager.add_message(f"Gap analysis failed: {str(e)}", style="yellow")
 
             return []
-    
-    def prioritize_questions(self, state: ResearchState):
-        """
-        Re-prioritize questions based on current findings
-        """
-        # Sort question queue by priority
-        state.question_queue.sort(
-            key=lambda qid: state.get_question_by_id(qid).priority if state.get_question_by_id(qid) else 0,
-            reverse=True
-        )

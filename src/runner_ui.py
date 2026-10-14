@@ -146,6 +146,3 @@ class QueueUI:
         elif style in ("yellow", "dim yellow"):
             level = "warn"
         self.log(level, cleaned)
-
-    def add_section(self, title: str, content: str, style: str = "white") -> None:
-        self.log("info", f"{title}: {content}")

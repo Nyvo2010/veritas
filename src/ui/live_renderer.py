@@ -184,33 +184,6 @@ class LiveRenderer:
             self._log.append(LogEntry(level=level, text=cleaned, timestamp=time.time()))
             self._render_locked()
 
-    def log_info(self, text: str) -> None:
-        self.log("info", text)
-
-    def log_ok(self, text: str) -> None:
-        self.log("ok", text)
-
-    def log_warn(self, text: str) -> None:
-        self.log("warn", text)
-
-    def log_error(self, text: str) -> None:
-        self.log("err", text)
-
-    def log_phase(self, text: str) -> None:
-        self.set_phase(text)
-
-    def log_search(self, query: str, count: int) -> None:
-        short = query if len(query) <= 90 else query[:87] + "..."
-        self.log("search", f'Searching "{short}" — {count} results')
-
-    def log_insight(self, preview: str, confidence: float) -> None:
-        short = preview if len(preview) <= 140 else preview[:137] + "..."
-        self.log("insight", f"Insight ({confidence:.0%}): {short}")
-
-    def log_section(self, title: str, done: bool = False) -> None:
-        verb = "Completed" if done else "Writing"
-        self.log("info", f"{verb} section: {title}")
-
     # -- rendering (fixed heights, no jitter) --------------------------
 
     def _render_locked(self) -> None:

@@ -4,12 +4,10 @@ Tavily Client - Handles all interactions with Tavily Search API
 
 import sys
 import os
-import json
 import time
 import requests
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Optional
 from urllib.parse import urlparse
-import httpx
 import logging
 from tavily import TavilyClient
 
@@ -74,29 +72,6 @@ class TavilySearchClient:
                     return category
         
         return "general"
-    
-    def _should_include_result(
-        self,
-        url: str,
-        category_toggles: Dict[str, bool]
-    ) -> bool:
-        """Check if a result should be included based on category toggles"""
-        category = self._categorize_url(url)
-        return category_toggles.get(category, True)
-    
-    def _filter_results(
-        self,
-        results: List[Dict],
-        category_toggles: Dict[str, bool]
-    ) -> List[Dict]:
-        """Filter search results based on category toggles"""
-        filtered = []
-        for result in results:
-            url = result.get("url", "")
-            if self._should_include_result(url, category_toggles):
-                result["category"] = self._categorize_url(url)
-                filtered.append(result)
-        return filtered
     
     def search(
         self,
@@ -194,11 +169,3 @@ class TavilySearchClient:
                 attempt += 1
         
         raise Exception(f"Failed to complete Tavily search after {self.max_retries} attempts")
-    
-    def get_category_stats(self, results: List[Dict]) -> Dict[str, int]:
-        """Get count of results per category"""
-        stats = {}
-        for result in results:
-            category = result.get("category", "general")
-            stats[category] = stats.get(category, 0) + 1
-        return stats

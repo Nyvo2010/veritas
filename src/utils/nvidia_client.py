@@ -13,7 +13,7 @@ import json
 import re
 import time
 import asyncio
-from typing import List, Dict, Tuple
+from typing import List, Dict
 from urllib.parse import urlparse
 
 import httpx
@@ -305,101 +305,6 @@ class NvidiaClient:
 
                 else:
                     log.debug(f"   Unexpected error in NVIDIA chat completion: {e}")
-                    raise
-
-        raise Exception(f"Failed to complete request after {self.max_retries} attempts")
-
-    async def async_chat_completion(
-        self,
-        messages: List[Dict[str, str]],
-        temperature: float = TEMPERATURE_ANALYSIS,
-        max_tokens: int = 4096,
-        json_mode: bool = False,
-        top_p: float = TOP_P,
-        reasoning_effort: str = None,  # Kept for compatibility, not used by NIM
-    ) -> str:
-        """
-        Async version of chat completion with retry logic
-
-        Args:
-            messages: Chat messages as dicts
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens in response
-            json_mode: Enable JSON mode
-            top_p: Nucleus sampling parameter
-            reasoning_effort: Not used (kept for compatibility)
-
-        Returns:
-            Response text
-        """
-        # Rate limiting: ensure at least 1 second between API calls
-        current_time = time.time()
-        time_since_last_call = current_time - self._last_api_call
-        if time_since_last_call < self._rate_limit_delay:
-            await asyncio.sleep(self._rate_limit_delay - time_since_last_call)
-
-        attempt = 0
-
-        while attempt < self.max_retries:
-            try:
-                self._last_api_call = time.time()  # Update last call time
-
-                params = {
-                    "model": self.model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "top_p": top_p,
-                }
-
-                if json_mode:
-                    params["response_format"] = {"type": "json_object"}
-
-                response = await self.async_client.chat.completions.create(**params)
-                self._last_finish_reason = response.choices[0].finish_reason
-                content = response.choices[0].message.content
-                return content or ""
-
-            except httpx.ConnectError as e:
-                self._raise_connection_error(e)
-            except Exception as e:
-                error_str = str(e).lower()
-
-                # Handle rate limiting
-                if "rate" in error_str or "429" in error_str:
-                    log.debug(f"   Rate limit error: {e}")
-                    if not await self._handle_rate_limit_async(attempt):
-                        raise Exception(f"Max retries ({self.max_retries}) exceeded due to rate limiting")
-                    attempt += 1
-
-                # Handle timeout errors
-                elif "timeout" in error_str or "timed out" in error_str:
-                    log.debug(f"   Timeout error: {e}")
-                    if attempt >= self.max_retries - 1:
-                        raise Exception(f"API timeout after {self.max_retries} attempts")
-                    await asyncio.sleep(self.retry_delay)
-                    attempt += 1
-
-                # Handle bad request errors
-                elif "400" in error_str or "bad request" in error_str:
-                    log.debug(f"   Bad request error: {e}")
-                    raise Exception(f"Bad request to NVIDIA NIM API: {e}")
-
-                # Handle auth errors (don't retry)
-                elif "401" in error_str or "403" in error_str or "unauthorized" in error_str or "forbidden" in error_str:
-                    log.debug(f"   Auth error: {e}")
-                    raise Exception(f"NVIDIA NIM authentication failed (check NVIDIA_API_KEY): {e}")
-
-                # Handle general API errors
-                elif "api" in error_str or "500" in error_str or "503" in error_str:
-                    log.debug(f"   API error: {e}")
-                    if attempt >= self.max_retries - 1:
-                        raise Exception(f"API error after {self.max_retries} attempts: {e}")
-                    await asyncio.sleep(self.retry_delay)
-                    attempt += 1
-
-                else:
-                    log.debug(f"   Unexpected error in async NVIDIA chat completion: {e}")
                     raise
 
         raise Exception(f"Failed to complete request after {self.max_retries} attempts")

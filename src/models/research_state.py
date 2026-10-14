@@ -10,7 +10,6 @@ from typing import List, Dict, Optional, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from config import SearchDepth
 
 
 class QuestionStatus(Enum):
@@ -52,19 +51,6 @@ class SearchResult:
     category: Optional[str] = None  # social, educational, etc.
     timestamp: datetime = field(default_factory=datetime.now)
     question_id: Optional[str] = None
-
-
-@dataclass
-class SearchQuery:
-    """Represents a search query with metadata"""
-    query: str
-    question_id: str
-    search_depth: SearchDepth = SearchDepth.BASIC
-    max_results: int = 15
-    include_raw_content: bool = True
-    include_answer: bool = True
-    topic: str = "general"  # general, news, finance
-    time_range: Optional[str] = None  # day, week, month, year
 
 
 @dataclass
@@ -174,7 +160,3 @@ class ResearchState:
     def get_findings_for_question(self, question_id: str) -> List[KnowledgeFinding]:
         """Get all findings related to a specific question"""
         return [f for f in self.findings if f.question_id == question_id]
-    
-    def get_sources_for_question(self, question_id: str) -> List[SearchResult]:
-        """Get all search results for a specific question"""
-        return [r for r in self.search_results if r.question_id == question_id]

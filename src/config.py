@@ -8,20 +8,6 @@ from dotenv import load_dotenv
 # Load .env (if present) so config reads environment variables
 load_dotenv()
 
-from enum import Enum
-# Website Category Filters
-class WebsiteCategory(Enum):
-    SOCIAL = "social"
-    EDUCATIONAL = "educational"
-    OPEN_KNOWLEDGE = "open_knowledge"
-    NEWS = "news"
-    GENERAL = "general"
-
-# Search Depth Enum (for Tavily)
-class SearchDepth(Enum):
-    BASIC = "basic"
-    ADVANCED = "advanced"
-
 # API Keys
 # NVIDIA NIM API key (OpenAI-compatible endpoint at https://integrate.api.nvidia.com/v1)
 NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY", "")

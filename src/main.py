@@ -431,18 +431,6 @@ class DeepResearchAgent:
         except Exception:
             return None
 
-    def _format_toggles(self) -> str:
-        """Format category toggles for display"""
-        enabled = [k for k, v in self.category_toggles.items() if v]
-        disabled = [k for k, v in self.category_toggles.items() if not v]
-
-        result = ""
-        if enabled:
-            result += "[ON] " + ", ".join(enabled)
-        if disabled:
-            result += " | [OFF] " + ", ".join(disabled)
-        return result or "All enabled"
-
     def set_category_toggle(self, category: str, enabled: bool, silent: bool = False):
         """
         Toggle a website category on/off
