@@ -52,12 +52,15 @@ from runner_ui import QueueUI
 from main import DeepResearchAgent
 
 
+# Restrained palette (one accent, saturation low, neutrals consistent,
+# never pure black, nothing neon). Theme names are user-facing; each maps
+# to a desaturated tone.
 ACCENTS = {
-    "cyan": "cyan",
-    "blue": "blue",
-    "magenta": "magenta",
-    "green": "green",
-    "amber": "yellow",
+    "cyan": "#5f9ea0",      # muted cadet teal
+    "blue": "#6f8fb8",      # dusty blue
+    "magenta": "#9a7fa8",   # muted mauve
+    "green": "#7d9b76",     # sage
+    "amber": "#b3945e",     # muted brass
 }
 
 LOG_GLYPH = {
@@ -90,7 +93,7 @@ BACK = {
 
 
 def accent() -> str:
-    return ACCENTS.get(str(settings_sig().get("theme", "cyan")), "cyan")
+    return ACCENTS.get(str(settings_sig().get("theme", "cyan")), ACCENTS["cyan"])
 
 
 def term_width() -> int:
@@ -107,20 +110,28 @@ def banner_lines() -> list:
 
 
 # Flat colored panels: solid title bar + tinted body, no line borders.
-PANEL_BG = "#1e1e2e"
-TITLE_FG = "black"
+PANEL_BG = "#232326"        # neutral zinc, no color cast
+TITLE_FG = "#1c1c1e"        # near-black for title bars
+SECONDARY = "#8e8e93"       # descriptions, values
+TERTIARY = "#636366"        # hints, footnotes
+DANGER = "#b86767"          # muted brick for errors
+
+
+def gap(rows: int = 1) -> Text:
+    """Fixed breathing room between blocks (rhythm, not decoration)."""
+    return Text("\n".join([""] * rows))
 
 
 def frame(title: str, *children, color: str = None) -> Box:
     bar = color or accent()
     return Box(
         Box(Text(title, fg=TITLE_FG, bold=True), bg=bar),
-        Box(*children, bg=PANEL_BG, padding=1),
+        Box(*children, bg=PANEL_BG, padding_y=1, padding_x=2),
     )
 
 
 def hint(text: str) -> Text:
-    return Text(text, fg="gray")
+    return Text(text, fg=TERTIARY)
 
 
 def short_query(q: str, n: int = 70) -> str:
@@ -261,7 +272,8 @@ def menu_select() -> SelectRenderable:
             SelectOption("Quit", "quit", "Exit Veritas"),
         ],
         selected_background_color=accent(),
-        selected_text_color="black",
+        selected_text_color=TITLE_FG,
+        description_color=SECONDARY,
     )
     sel.on("itemSelected", on_pick)
     return sel
@@ -298,7 +310,7 @@ def sources_select(session: bool) -> SelectRenderable:
         options=options,
         selected_index=min(state["cursor"], len(options) - 1),
         selected_background_color=accent(),
-        selected_text_color="black",
+        selected_text_color=TITLE_FG,
     )
     sel.on("itemSelected", on_pick)
     sel.on("selectionChanged", lambda idx, opt: state.update(cursor=idx))
@@ -316,8 +328,13 @@ def progress_bar() -> str:
     return "█" * filled + "░" * (width - filled) + f" {ratio * 100:.0f}%"
 
 
-def run_lines() -> str:
-    return "\n".join(text for _, text in log_sig()[-12:]) or "Waiting for activity..."
+def activity_lines() -> list:
+    """Activity log with quiet hierarchy: phases accented, problems warm."""
+    lines = log_sig()[-12:]
+    if not lines:
+        return [Text("Waiting for activity...", fg=SECONDARY)]
+    colors = {"err": DANGER, "warn": ACCENTS["amber"], "phase": accent()}
+    return [Text(text, fg=colors.get(level, SECONDARY)) for level, text in lines]
 
 
 def settings_summary() -> str:
@@ -409,7 +426,9 @@ def App():
         selects["menu"] = sel
         return Box(
             Text("\n".join(banner_lines()), fg=accent()),
+            gap(),
             frame("Main Menu", sel),
+            gap(),
             hint("Up/Down to move, Enter to select, q to quit"),
         )
 
@@ -436,7 +455,7 @@ def App():
                 "New research (1/3)",
                 Text("What do you want to research?"),
                 query_input,
-                Text(err_sig() or "", fg="red"),
+                Text(err_sig() or "", fg=DANGER),
                 hint("Enter to continue, Esc to go back"),
             )
         )
@@ -467,7 +486,7 @@ def App():
                 Text(f"Query: {short_query(state['query'])}"),
                 Text(f"Max iterations (default {state['max_iter']}, 1-20):"),
                 iter_input,
-                Text(err_sig() or "", fg="red"),
+                Text(err_sig() or "", fg=DANGER),
                 hint("Enter to continue, Esc to go back"),
             )
         )
@@ -486,15 +505,17 @@ def App():
 
     if current == "run":
         frames = theme.SPINNER_FRAMES
-        completed, total, status = prog_sig()
         return Box(
             frame(
                 "Research running",
-                Text(f"{frames[spin_sig()]} {short_query(state['query'])}"),
-                Text(lambda: phase_sig()),
-                Text(lambda: progress_bar()),
-                Text(lambda: f"Step {prog_sig()[0]:.0f}/{prog_sig()[1]}  |  {elapsed_sig()}  |  {prog_sig()[2]}"),
-                frame("Activity", Text(lambda: run_lines() or " ")),
+                Text(f"{frames[spin_sig()]} {short_query(state['query'])}", bold=True),
+                gap(),
+                Text(lambda: phase_sig(), fg=SECONDARY),
+                Text(lambda: progress_bar(), fg=accent()),
+                Text(lambda: f"Step {prog_sig()[0]:.0f}/{prog_sig()[1]}  |  {elapsed_sig()}  |  {prog_sig()[2]}", fg=SECONDARY),
+                gap(),
+                frame("Activity", *activity_lines()),
+                gap(),
                 hint("Ctrl+C quits (partial work is lost)"),
             )
         )
@@ -516,11 +537,13 @@ def App():
                 ]
             )
             return Box(
-                frame("Research complete", Text(body, fg="green")),
+                frame("Research complete", Text(body)),
+                gap(),
                 hint("Enter to return to the menu"),
             )
         return Box(
-            frame("Research failed", Text(str(result.get("error", "Unknown error")), fg="red")),
+            frame("Research failed", Text(str(result.get("error", "Unknown error")), fg=DANGER)),
+            gap(),
             hint("Enter to return to the menu"),
         )
 
@@ -544,13 +567,16 @@ def App():
                 SelectOption("Back", "back"),
             ],
             selected_background_color=accent(),
-            selected_text_color="black",
+            selected_text_color=TITLE_FG,
+            description_color=SECONDARY,
         )
         sel.on("itemSelected", on_pick)
         selects["settings"] = sel
         return Box(
             frame("Settings", Text(settings_summary())),
+            gap(),
             frame("Edit", sel),
+            gap(),
             hint("Up/Down to move, Enter to edit, Esc for menu"),
         )
 
@@ -563,7 +589,7 @@ def App():
         sel = SelectRenderable(
             options=[SelectOption(name, name) for name in theme.THEMES],
             selected_background_color=accent(),
-            selected_text_color="black",
+            selected_text_color=TITLE_FG,
         )
         sel.on("itemSelected", on_pick)
         selects["set-theme"] = sel
@@ -601,7 +627,7 @@ def App():
                 "Reports folder",
                 Text(f"Current: {reports_dir(settings_sig())}"),
                 reports_input,
-                Text(err_sig() or "", fg="red"),
+                Text(err_sig() or "", fg=DANGER),
                 hint("Enter to save, Esc to go back"),
             )
         )
@@ -626,7 +652,8 @@ def App():
             options=[SelectOption(label, key, current) for key, (label, current) in labels.items()]
             + [SelectOption("Back", "back")],
             selected_background_color=accent(),
-            selected_text_color="black",
+            selected_text_color=TITLE_FG,
+            description_color=SECONDARY,
         )
         sel.on("itemSelected", on_pick)
         selects["set-keys"] = sel
@@ -682,7 +709,8 @@ def App():
                 SelectOption("Back", "back"),
             ],
             selected_background_color=accent(),
-            selected_text_color="black",
+            selected_text_color=TITLE_FG,
+            description_color=SECONDARY,
         )
         sel.on("itemSelected", on_pick)
         selects["set-defaults"] = sel
@@ -717,7 +745,7 @@ def App():
                 label,
                 Text(f"Current: {settings_sig().get(field, '')}"),
                 default_input,
-                Text(err_sig() or "", fg="red"),
+                Text(err_sig() or "", fg=DANGER),
                 hint("Enter to save, Esc to go back"),
             )
         )
@@ -730,7 +758,7 @@ def App():
             hint("Enter toggles a source, Esc to go back"),
         )
 
-    return Box(Text("Unknown screen", fg="red"))
+    return Box(Text("Unknown screen", fg=DANGER))
 
 
 def run() -> None:
