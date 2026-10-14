@@ -198,7 +198,6 @@ phase_sig = Signal("Preparing...")
 elapsed_sig = Signal("0s")
 spin_sig = Signal(0)
 tick_sig = Signal(0)
-detail_sig = Signal("")
 err_sig = Signal("")
 
 state = {
@@ -219,32 +218,35 @@ pump_stop = threading.Event()
 _keyboard_bound: dict = {}
 
 
+SUBTITLE_WIDTH = 44
+
+
 def tracked_select(name: str, options: list, **kw) -> SelectRenderable:
     """Button-like select list: highlight hugs the content with even
-    padding on all sides, quiet styling, cursor surviving re-renders.
+    padding on all sides, cursor surviving re-renders.
 
-    Descriptions render on a dedicated detail line under the list (via
-    detail_sig) instead of inside the rows, so every button keeps the
-    same compact shape. The logo ticker re-evaluates the tree several
-    times a second; without a persistent cursor every rebuild would
-    jump back to the top option.
+    Every button carries its subtitle inline in an aligned second column,
+    so all rows share one compact shape. The logo ticker re-evaluates
+    the tree several times a second; without a persistent cursor every
+    rebuild would jump back to the top option.
     """
-    for opt in options:
-        label = opt.name.strip()
-        opt.name = f"  {label}  "
+    labels = [str(opt.name).strip() for opt in options]
+    width = max([len(label) for label in labels] + [0])
+    for opt, label in zip(options, labels):
+        subtitle = str(getattr(opt, "description", "") or "").strip()
+        if len(subtitle) > SUBTITLE_WIDTH:
+            subtitle = subtitle[: SUBTITLE_WIDTH - 1] + "…"
+        padded = f"  {label:<{width}}  "
+        opt.name = padded + subtitle if subtitle else padded.rstrip() + "  "
+        opt.description = ""
     kw.setdefault("selected_background_color", accent())
     kw.setdefault("selected_text_color", TITLE_FG)
-    kw.setdefault("description_color", SECONDARY)
     kw.setdefault("item_spacing", 1)
     kw.setdefault("show_description", False)
     initial = min(state["cursors"].get(name, 0), max(len(options) - 1, 0))
 
     def on_move(idx: int, opt) -> None:
         state["cursors"][name] = idx
-        try:
-            detail_sig.set(getattr(opt, "description", "") or "")
-        except Exception:
-            pass
 
     sel = SelectRenderable(
         options=options,
@@ -253,18 +255,8 @@ def tracked_select(name: str, options: list, **kw) -> SelectRenderable:
         **kw,
     )
     sel.on("selectionChanged", on_move)
-    try:
-        current = options[initial] if options else None
-        detail_sig.set(getattr(current, "description", "") or "")
-    except Exception:
-        pass
     selects[name] = sel
     return sel
-
-
-def detail_line() -> Text:
-    """Context for the highlighted button; blank keeps the rhythm stable."""
-    return Text(lambda: detail_sig() or " ", fg=SECONDARY)
 
 
 # --------------------------------------------------------------------------
@@ -493,7 +485,7 @@ def App():
         return Box(
             Box(*logo_lines(tick_sig())),
             gap(),
-            frame("Main Menu", sel, detail_line()),
+            frame("Main Menu", sel),
             gap(),
             hint("Up/Down to move, Enter to select, q to quit"),
         )
@@ -565,7 +557,6 @@ def App():
                 "New research (3/3)",
                 Text(f"Query: {short_query(state['query'])}  |  Iterations: {state['max_iter']}"),
                 sel,
-                detail_line(),
                 hint("Up/Down to move, Enter toggles a source, Esc to go back"),
             )
         )
@@ -637,7 +628,7 @@ def App():
         ])
         sel.on("itemSelected", on_pick)
         return Box(
-            frame("Settings", sel, detail_line()),
+            frame("Settings", sel),
             gap(),
             hint("Up/Down to move, Enter to edit, Esc for menu"),
         )
@@ -654,7 +645,7 @@ def App():
         )
         sel.on("itemSelected", on_pick)
         return Box(
-            frame("Color theme", sel, detail_line()),
+            frame("Color theme", sel),
             gap(),
             hint("Enter to apply, Esc to go back"),
         )
@@ -716,7 +707,7 @@ def App():
         )
         sel.on("itemSelected", on_pick)
         return Box(
-            frame("API keys", sel, detail_line()),
+            frame("API keys", sel),
             gap(),
             hint("Keys are stored only in your local settings file"),
         )
@@ -768,7 +759,7 @@ def App():
         ])
         sel.on("itemSelected", on_pick)
         return Box(
-            frame("Research defaults", sel, detail_line()),
+            frame("Research defaults", sel),
             gap(),
             hint("Enter to edit, Esc to go back"),
         )
@@ -810,7 +801,7 @@ def App():
     if current == "set-sources":
         sel = sources_select(session=False)
         return Box(
-            frame("Default sources", sel, detail_line()),
+            frame("Default sources", sel),
             gap(),
             hint("Enter toggles a source, Esc to go back"),
         )
@@ -838,7 +829,6 @@ def App():
                 Text("Keys are stored only on this machine. Environment variables always win when set.", fg=SECONDARY),
                 gap(),
                 sel,
-                detail_line(),
             ),
             gap(),
             hint("Enter to choose, Esc for menu"),
@@ -927,7 +917,7 @@ def App():
         )
         sel.on("itemSelected", on_pick)
         return Box(
-            frame("Setup (4/4)", Text("Pick a color theme", bold=True), sel, detail_line()),
+            frame("Setup (4/4)", Text("Pick a color theme", bold=True), sel),
             gap(),
             hint("Enter to finish setup"),
         )
@@ -951,7 +941,6 @@ def App():
                 Text(f"Theme       {s.get('theme', '')}", fg=SECONDARY),
                 gap(),
                 sel,
-                detail_line(),
             ),
             gap(),
             hint("Enter for the menu"),
