@@ -435,7 +435,7 @@ def sources_select(session: bool) -> SelectRenderable:
     if session:
         options.append(SelectOption("Start research", "__start__", "Begin with these sources"))
     else:
-        options.append(SelectOption("Back", "__back__"))
+        options.append(SelectOption("Back", "__back__", "Settings"))
 
     sel = tracked_select("sources" if session else "set-sources", options)
     sel.on("itemSelected", on_pick)
@@ -669,7 +669,7 @@ def App():
             SelectOption("Research defaults", "set-defaults", "Iterations + results per search"),
             SelectOption("Default sources", "set-sources", f"{on}/{len(active)} enabled"),
             SelectOption("Setup wizard", "setup-welcome", "Keys, folder, theme from scratch"),
-            SelectOption("Back", "back"),
+            SelectOption("Back", "back", "Main menu"),
         ])
         sel.on("itemSelected", on_pick)
         return screen_box("Settings", sel, enter="edit", back="menu")
@@ -734,7 +734,7 @@ def App():
         sel = tracked_select(
             "set-keys",
             [SelectOption(label, key, current) for key, (label, current) in labels.items()]
-            + [SelectOption("Back", "back")],
+            + [SelectOption("Back", "back", "Settings")],
         )
         sel.on("itemSelected", on_pick)
         return screen_box(
@@ -781,7 +781,7 @@ def App():
         sel = tracked_select("set-defaults", [
             SelectOption("Max iterations", "max_iterations", f"Current: {s.get('max_iterations', '')}"),
             SelectOption("Max search results", "max_search_results", f"Current: {s.get('max_search_results', '')}"),
-            SelectOption("Back", "back"),
+            SelectOption("Back", "back", "Settings"),
         ])
         sel.on("itemSelected", on_pick)
         return screen_box("Research defaults", sel, enter="edit", back="back")
@@ -834,7 +834,7 @@ def App():
 
         sel = tracked_select("setup-welcome", [
             SelectOption("Continue setup", "start", "Takes about a minute"),
-            SelectOption("Back", "menu", "Return to the main menu"),
+            SelectOption("Back", "menu", "Main menu"),
         ])
         sel.on("itemSelected", on_pick)
         return Box(
