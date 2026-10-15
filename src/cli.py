@@ -443,26 +443,10 @@ def classic_main():
 
 
 def main():
-    """Launch the OpenTUI app, falling back to the Rich CLI if needed.
-
-    OpenTUI emits 24-bit color unconditionally and has no indexed-color
-    mode (verified against the installed 0.1.2 renderer). On terminals
-    without truecolor support — pre-Tahoe Terminal.app mangles those
-    escapes — no color choice can render correctly there. Rich instead
-    detects the terminal's color system and emits indexed/ANSI escapes
-    the terminal handles natively, so it is the interface that keeps
-    working colors and visible panels there. Same features either way.
-    Override with VERITAS_TRUECOLOR=1/0.
-    """
+    """Launch the OpenTUI app, falling back to the Rich CLI if needed."""
     try:
         from tui_app import run as run_tui
     except ImportError:
-        return classic_main()
-    try:
-        from ui import termcap
-    except ImportError:
-        termcap = None
-    if termcap is not None and not termcap.supports_truecolor():
         return classic_main()
     try:
         run_tui()

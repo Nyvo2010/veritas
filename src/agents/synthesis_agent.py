@@ -202,7 +202,6 @@ Return JSON:
             return cross_ref
         
         except Exception as e:
-            error_msg = f"Cross-reference analysis failed: {str(e)}"
             if ui_manager:
                 ui_manager.add_message(f"Cross-reference error: {str(e)}", style="red bold")
 

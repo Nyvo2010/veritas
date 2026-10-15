@@ -6,7 +6,7 @@ import sys
 import os
 import time
 import requests
-from typing import List, Dict, Optional
+from typing import Dict, Optional
 from urllib.parse import urlparse
 import logging
 from tavily import TavilyClient

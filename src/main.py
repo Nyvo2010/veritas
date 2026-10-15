@@ -268,7 +268,7 @@ class DeepResearchAgent:
             state.reasoning_steps.append("\nPhase 3: Cross-Reference - Starting cross-reference analysis")
 
             try:
-                cross_ref = await asyncio.to_thread(
+                await asyncio.to_thread(
                     self.synthesis_agent.cross_reference_findings, state, ui
                 )
             except Exception as e:
@@ -277,7 +277,6 @@ class DeepResearchAgent:
                     "Warning: Cross-reference analysis failed, continuing...",
                     style="white"
                 )
-                cross_ref = {"consensus": [], "contradictions": []}
 
             state.reasoning_steps.append("Phase 3: Completed cross-reference analysis")
             completed += 1
