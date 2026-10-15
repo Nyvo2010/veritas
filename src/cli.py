@@ -129,9 +129,12 @@ def keys_menu(console: Console, settings: dict) -> dict:
 def defaults_menu(console: Console, settings: dict) -> dict:
     clear_screen()
     screens.print_header(console, "Settings - Research Defaults")
+    toggles_preview = dict(settings.get("category_toggles", {}))
+    on_preview = sum(1 for v in toggles_preview.values() if v)
     screens.kv_panel(console, "Current Defaults", [
         ("Max iterations", str(settings.get("max_iterations", 10))),
         ("Max search results", str(settings.get("max_search_results", 15))),
+        ("Default sources", f"{on_preview}/{len(toggles_preview)} categories enabled"),
     ])
     raw_iter = Prompt.ask(
         f"[{theme.PRIMARY}]Max iterations 1-20 or Enter to keep[/{theme.PRIMARY}]",
@@ -148,25 +151,19 @@ def defaults_menu(console: Console, settings: dict) -> dict:
         updates["max_search_results"] = int(raw_results)
     if updates:
         settings = update_settings(**updates)
-        screens.print_panel(console, "Defaults saved.", "Saved", style=theme.SUCCESS)
-    else:
-        screens.print_panel(console, "No changes made.", "Research Defaults")
-    pause(console)
-    return settings
 
-
-def default_sources_menu(console: Console, settings: dict) -> dict:
+    # Default sources live under Research defaults.
     toggles = dict(settings.get("category_toggles", {}))
     while True:
         clear_screen()
-        screens.print_header(console, "Settings - Default Sources")
+        screens.print_header(console, "Settings - Research Defaults > Default Sources")
         screens.filters_panel(console, toggles, title="Default Sources")
         choice = Prompt.ask(
-            f"[{theme.PRIMARY}]Toggle 1-{len(toggles)}, 'all', 'none', or Enter to go back[/{theme.PRIMARY}]",
+            f"[{theme.PRIMARY}]Toggle 1-{len(toggles)}, 'all', 'none', or Enter to save & go back[/{theme.PRIMARY}]",
             default="", show_default=False,
         ).strip().lower()
         if choice == "":
-            return settings
+            break
         names = list(toggles.keys())
         if choice == "all":
             toggles = {k: True for k in names}
@@ -179,6 +176,13 @@ def default_sources_menu(console: Console, settings: dict) -> dict:
             continue
         settings = update_settings(category_toggles=toggles)
 
+    if updates:
+        screens.print_panel(console, "Defaults saved.", "Saved", style=theme.SUCCESS)
+    else:
+        screens.print_panel(console, "No changes made.", "Research Defaults")
+    pause(console)
+    return settings
+
 
 def settings_menu(console: Console, settings: dict) -> dict:
     options = [
@@ -186,8 +190,7 @@ def settings_menu(console: Console, settings: dict) -> dict:
         ("2", "Reports folder"),
         ("3", "API keys"),
         ("4", "Research defaults"),
-        ("5", "Default sources"),
-        ("6", "Back to main menu"),
+        ("5", "Back to main menu"),
     ]
     while True:
         clear_screen()
@@ -211,9 +214,7 @@ def settings_menu(console: Console, settings: dict) -> dict:
             settings = keys_menu(console, settings)
         elif choice == "4":
             settings = defaults_menu(console, settings)
-        elif choice == "5":
-            settings = default_sources_menu(console, settings)
-        elif choice == "6" or choice == "":
+        elif choice == "5" or choice == "":
             return settings
 
 
@@ -442,10 +443,26 @@ def classic_main():
 
 
 def main():
-    """Launch the OpenTUI app, falling back to the Rich CLI if needed."""
+    """Launch the OpenTUI app, falling back to the Rich CLI if needed.
+
+    OpenTUI emits 24-bit color unconditionally and has no indexed-color
+    mode (verified against the installed 0.1.2 renderer). On terminals
+    without truecolor support — pre-Tahoe Terminal.app mangles those
+    escapes — no color choice can render correctly there. Rich instead
+    detects the terminal's color system and emits indexed/ANSI escapes
+    the terminal handles natively, so it is the interface that keeps
+    working colors and visible panels there. Same features either way.
+    Override with VERITAS_TRUECOLOR=1/0.
+    """
     try:
         from tui_app import run as run_tui
     except ImportError:
+        return classic_main()
+    try:
+        from ui import termcap
+    except ImportError:
+        termcap = None
+    if termcap is not None and not termcap.supports_truecolor():
         return classic_main()
     try:
         run_tui()

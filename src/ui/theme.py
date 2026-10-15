@@ -9,7 +9,7 @@ Rules enforced here so spacing never drifts again:
 
 from rich import box
 
-PRIMARY = "cyan"
+PRIMARY = "blue"
 SECONDARY = "white"
 SUCCESS = "green"
 ERROR = "red"
@@ -48,15 +48,20 @@ GLYPH_INSIGHT = "-"
 
 # Selectable UI color schemes (primary accent only; rest of palette is fixed).
 # Settings store the theme name; apply_theme() activates it process-wide.
+# Blue is the default and sits at the top of the theme menu.
 THEMES = {
-    "cyan": "cyan",
     "blue": "blue",
-    "magenta": "magenta",
     "green": "green",
+    "cyan": "cyan",
+    "magenta": "magenta",
     "amber": "dark_orange",
+    "red": "red",
+    "orange": "orange1",
+    "purple": "purple",
+    "white": "white",
 }
 
-DEFAULT_THEME = "cyan"
+DEFAULT_THEME = "blue"
 
 
 def apply_theme(name: str) -> str:

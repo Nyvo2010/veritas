@@ -33,7 +33,7 @@ DEFAULT_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
 DEFAULT_FALLBACK_MODEL = ""
 
 DEFAULTS: Dict[str, Any] = {
-    "theme": "cyan",
+    "theme": "blue",
     "reports_dir": os.path.join(os.path.expanduser("~"), "Veritas", "reports"),
     "llm_api_key": "",
     "llm_base_url": DEFAULT_NVIDIA_BASE_URL,
