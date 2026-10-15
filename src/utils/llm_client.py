@@ -217,10 +217,6 @@ class LLMClient:
         )
         raise ConnectionError(message) from error
 
-    def list_models(self, timeout: float = 15.0) -> List[str]:
-        """List model ids advertised by this client's endpoint."""
-        return fetch_models(self.api_base_url, getattr(self.client, "api_key", "") or "", timeout=timeout)
-
     def _with_fallback(self, call, *args, **kwargs):
         """Run *call*, retrying once on the fallback model if one is set.
 

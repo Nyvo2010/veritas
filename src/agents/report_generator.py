@@ -194,7 +194,6 @@ class ReportGeneratorAgent:
 
                     return order, title, content
                 except Exception as e:
-                    error_msg = f"Failed to generate section '{title}': {str(e)}"
                     if ui_manager:
                         ui_manager.add_message(
                             f"Error: {title[:40]} - {str(e)[:100]}",

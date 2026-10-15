@@ -138,7 +138,6 @@ THEME_BLURBS = {
 MARGIN_X = 2                # outer margin from the terminal edge
 PANEL_PAD_X = 2             # padding inside every panel
 INPUT_WIDTH = 64            # shared width for every text input
-SUBTITLE_LEN = 60           # subtitles truncate past this
 MAX_VISIBLE = 8             # list rows shown at once
 
 
@@ -1807,8 +1806,68 @@ def _reset_terminal() -> None:
         pass
 
 
+def apply_terminal_theme() -> bool:
+    """Adapt structural tokens to the terminal's live bg/fg (opencode-style).
+
+    Queries OSC 10 (fg) / OSC 11 (bg) BEFORE the renderer takes over stdin,
+    then derives system colors via :mod:`ui.termcap`. Semantic roles stay
+    intact: module constants (ACCENTS, PANEL_BG, SECONDARY, TERTIARY,
+    SUBTITLE, DANGER, WARNING, INFO, TITLE_FG) remain the single tokens
+    everything consumes.
+
+    - Truecolor path with a successful query: panel bg = mix(bg, fg, ~10%),
+      body (SECONDARY) = terminal fg exactly, muted (TERTIARY/SUBTITLE) =
+      mix(bg, fg, ~50%, documented as ~45%). Accents (ACCENTS, DANGER,
+      WARNING, INFO, TITLE_FG) are unchanged so the chosen theme stays.
+    - Limited-terminal (non-truecolor) path with a successful query:
+      structural colors collapse to terminal default (None = transparent,
+      zero escapes, always correct on any bg) with bold retained for
+      titles/selection; accent roles keep existing termcap.to_256() values.
+    - ANY failure (not a TTY, timeout, parse error, exception) returns
+      False with module constants byte-identical (current behavior).
+
+    Respects VERITAS_TRUECOLOR override via the import-time TRUECOLOR flag.
+    Safe to call headless: instant no-op when stdin/stdout are not TTYs.
+    """
+    global PANEL_BG, SECONDARY, TERTIARY, SUBTITLE, TITLE_FG
+    try:
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            return False
+        bg, fg = termcap.query_terminal_bg_fg()
+        if not bg or not fg:
+            return False
+        if TRUECOLOR:
+            try:
+                derived = termcap.derive_system_theme(bg, fg)
+            except Exception:
+                return False
+            PANEL_BG = derived["panel_bg"]
+            SECONDARY = derived["body"]
+            TERTIARY = derived["muted"]
+            SUBTITLE = derived["muted"]
+            # TITLE_FG + ACCENTS + DANGER/WARNING/INFO unchanged (accent path).
+        else:
+            # Monochrome collapse: zero escapes for structure, accents stay
+            # snapped via the existing to_256() values from import time.
+            PANEL_BG = None  # type: ignore[assignment]
+            SECONDARY = None  # type: ignore[assignment]
+            TERTIARY = None  # type: ignore[assignment]
+            SUBTITLE = None  # type: ignore[assignment]
+            TITLE_FG = None  # type: ignore[assignment]
+        return True
+    except Exception:
+        return False
+
+
 def run() -> None:
     """Launch the OpenTUI app (blocking until quit)."""
+    # Adapt to the terminal's real palette before the renderer owns stdin.
+    # Silent fallback to defaults on any failure; never changes import-time
+    # behavior (apply step runs only here).
+    try:
+        apply_terminal_theme()
+    except Exception:
+        pass
     # Fresh installs land in the setup wizard; everyone else gets the menu.
     try:
         current_settings = load_settings()
