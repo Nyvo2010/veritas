@@ -58,6 +58,7 @@ from settings import (
     update_settings,
 )
 from ui import theme
+from ui import termcap
 from runner_ui import QueueUI
 from utils.llm_client import fetch_models
 from main import DeepResearchAgent
@@ -68,11 +69,15 @@ from main import DeepResearchAgent
 # --------------------------------------------------------------------------
 
 ACCENTS = {
-    "cyan": "#5f9ea0",      # muted cadet teal
-    "blue": "#6f8fb8",      # dusty blue
-    "magenta": "#9a7fa8",   # muted mauve
-    "green": "#7d9b76",     # sage
-    "amber": "#b3945e",     # muted brass
+    "blue": "#6f8fb8",       # dusty blue (default)
+    "green": "#7d9b76",      # sage
+    "cyan": "#5f9ea0",       # muted cadet teal
+    "magenta": "#9a7fa8",    # muted mauve
+    "amber": "#b3945e",      # muted brass
+    "red": "#b86767",        # muted brick
+    "orange": "#b07d4f",     # muted copper
+    "purple": "#8a7fa8",     # muted lavender
+    "white": "#c9c9c9",      # soft white
 }
 
 PANEL_BG = "#232326"        # neutral zinc, no color cast
@@ -83,6 +88,22 @@ SUBTITLE = "#707074"        # dimmer than body, softer than hints
 DANGER = "#b86767"          # muted brick for errors
 WARNING = "#b3945e"         # muted brass for warnings
 INFO = "#6f8fb8"            # dusty blue for neutral notices
+
+# Terminal consistency: Terminal.app and other 256-color terminals quantize
+# 24-bit escapes on their own terms (hue shifts, washed-out grays, banded
+# gradients). Snapping once at startup keeps the palette deterministic
+# everywhere; truecolor terminals keep the exact hex values above.
+TRUECOLOR = termcap.supports_truecolor()
+if not TRUECOLOR:
+    ACCENTS = {name: termcap.to_256(value) for name, value in ACCENTS.items()}
+    PANEL_BG = termcap.to_256(PANEL_BG)
+    TITLE_FG = termcap.to_256(TITLE_FG)
+    SECONDARY = termcap.to_256(SECONDARY)
+    TERTIARY = termcap.to_256(TERTIARY)
+    SUBTITLE = termcap.to_256(SUBTITLE)
+    DANGER = termcap.to_256(DANGER)
+    WARNING = termcap.to_256(WARNING)
+    INFO = termcap.to_256(INFO)
 
 LOG_GLYPH = {
     "phase": "*",
@@ -102,11 +123,15 @@ NOTICE_STYLE = {
 }
 
 THEME_BLURBS = {
-    "cyan": "Muted cadet teal",
-    "blue": "Dusty blue",
-    "magenta": "Muted mauve",
+    "blue": "Dusty blue (default)",
     "green": "Sage",
+    "cyan": "Muted cadet teal",
+    "magenta": "Muted mauve",
     "amber": "Muted brass",
+    "red": "Muted brick",
+    "orange": "Muted copper",
+    "purple": "Muted lavender",
+    "white": "Soft white",
 }
 
 # Shared geometry so every screen lines up on the same grid.
@@ -149,7 +174,7 @@ BACK = {
     "set-tavily": "set-search",
     "set-defaults": "settings",
     "set-default": "set-defaults",
-    "set-sources": "set-search",
+    "set-sources": "set-defaults",
     "setup-welcome": "menu",
     "setup-endpoint": "setup-welcome",
     "setup-llm-key": "setup-endpoint",
@@ -208,7 +233,7 @@ def inner_width() -> int:
 
 
 def accent() -> str:
-    return ACCENTS.get(str(settings_sig().get("theme", "cyan")), ACCENTS["cyan"])
+    return ACCENTS.get(str(settings_sig().get("theme", "blue")), ACCENTS["blue"])
 
 
 def banner_lines() -> list:
@@ -252,6 +277,10 @@ def logo_lines(tick: int) -> list:
     """Banner with a slow tonal shimmer: same accent family, top lighter,
     a soft wave traveling downward. Subtle on purpose."""
     lines = banner_lines()
+    if not TRUECOLOR:
+        # Without truecolor a shade wave bands into visible steps, so keep
+        # the banner a flat accent instead.
+        return [Text(line, fg=accent()) for line in lines]
     total = max(len(lines) - 1, 1)
     base = accent()
     out = []
@@ -991,8 +1020,8 @@ def screen_settings() -> Box:
         {"label": "Color theme", "value": "set-theme", "subtitle": f"Current: {str(s.get('theme', '')).title()}"},
         {"label": "Reports folder", "value": "set-reports", "subtitle": reports_dir(s)},
         {"label": "AI provider", "value": "set-provider", "subtitle": provider_blurb(s)},
-        {"label": "Search", "value": "set-search", "subtitle": f"Tavily {tavily} · Sources {on}/{len(toggles)}"},
-        {"label": "Research defaults", "value": "set-defaults", "subtitle": "Iterations + results per search"},
+        {"label": "Search", "value": "set-search", "subtitle": f"Tavily {tavily}"},
+        {"label": "Research defaults", "value": "set-defaults", "subtitle": f"Iterations + results + sources {on}/{len(toggles)}"},
         {"label": "Setup wizard", "value": "setup-welcome", "subtitle": "Keys, folder, theme from scratch"},
         {"label": "Back", "value": "back", "subtitle": "Main menu"},
     ]
@@ -1143,11 +1172,8 @@ def screen_set_search() -> Box:
             go(value)
 
     s = settings_sig()
-    toggles = s.get("category_toggles", {})
-    on = sum(1 for v in toggles.values() if v)
     items = [
         {"label": "Tavily API key", "value": "set-tavily", "subtitle": mask_key(s.get("tavily_api_key", ""))},
-        {"label": "Default sources", "value": "set-sources", "subtitle": f"{on}/{len(toggles)} categories enabled"},
         {"label": "Back", "value": "back", "subtitle": "Settings"},
     ]
     register_list("set-search", items, on_pick)
@@ -1181,7 +1207,7 @@ def screen_set_sources() -> Box:
     def activate(item) -> None:
         value = item["value"]
         if value == "__back__":
-            go("set-search")
+            go("set-defaults")
             return
         if value in toggles:
             toggles[value] = not toggles[value]
@@ -1195,7 +1221,7 @@ def screen_set_sources() -> Box:
             "value": name,
             "subtitle": "Enabled" if enabled else "Disabled",
         })
-    items.append({"label": "Back", "value": "__back__", "subtitle": "Search settings"})
+    items.append({"label": "Back", "value": "__back__", "subtitle": "Research defaults"})
     register_list("set-sources", items, activate)
 
     on = sum(1 for v in toggles.values() if v)
@@ -1216,15 +1242,21 @@ def screen_set_defaults() -> Box:
         value = item["value"]
         if value == "back":
             go("settings")
+        elif value == "set-sources":
+            clear_notice()
+            go("set-sources")
         else:
             state["default_field"] = value
             clear_notice()
             go("set-default")
 
     s = settings_sig()
+    toggles = s.get("category_toggles", {})
+    on = sum(1 for v in toggles.values() if v)
     items = [
         {"label": "Max iterations", "value": "max_iterations", "subtitle": f"Current: {s.get('max_iterations', '')}"},
         {"label": "Max search results", "value": "max_search_results", "subtitle": f"Current: {s.get('max_search_results', '')}"},
+        {"label": "Default sources", "value": "set-sources", "subtitle": f"{on}/{len(toggles)} categories enabled"},
         {"label": "Back", "value": "back", "subtitle": "Settings"},
     ]
     register_list("set-defaults", items, on_pick)
