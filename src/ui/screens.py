@@ -3,13 +3,15 @@
 Every screen uses:
 - compact logo header (no animation, fixed 7-line wordmark)
 - single console.print() blank line between blocks
-- Panel(padding=(0, 2), box=ROUNDED) everywhere
+- Tinted blocks (accent title over a dark fill, no ASCII borders), matching
+  the OpenTUI panels. Rich downgrades the hex fill to indexed escapes on
+  256-color terminals, so the style holds everywhere.
 """
 
 from typing import Dict, List, Optional
 
-from rich.console import Console
-from rich.panel import Panel
+from rich.console import Console, Group
+from rich.padding import Padding
 from rich.table import Table
 from rich.text import Text
 from rich import box as rich_box
@@ -17,20 +19,39 @@ from rich import box as rich_box
 from ui import theme
 
 
+PANEL_PAD = (1, 2)
+
+
+def block_renderable(title: Optional[str], body, title_style: Optional[str] = None):
+    """Tinted block: bold title label over a dark fill, no ASCII borders.
+
+    Mirrors the OpenTUI ``panel()`` (title, breathing room, tinted body).
+    Returns a renderable for embedding in layouts; use the print_*
+    helpers for direct screen output.
+    """
+    inner = [body] if not title else [
+        Text(title, style=f"bold {title_style or theme.PRIMARY}"),
+        Text(""),
+        body,
+    ]
+    return Padding(Group(*inner), PANEL_PAD, style=f"on {theme.PANEL_BG}")
+
+
 def print_header(console: Console, subtitle: Optional[str] = None) -> None:
-    # no_wrap keeps wide ASCII art intact instead of reflowing it.
-    logo = Text("\n".join(theme.COMPACT_LOGO), style=f"bold {theme.PRIMARY}", no_wrap=True)
     title = theme.LOGO_SUBTITLE if subtitle is None else f"{theme.LOGO_SUBTITLE} — {subtitle}"
-    console.print(
-        Panel(
-            logo,
-            title=title,
-            title_align="left",
-            box=theme.PANEL_BOX,
-            style=theme.PRIMARY,
-            padding=theme.PANEL_PADDING,
-        )
-    )
+    try:
+        width = console.width
+    except Exception:
+        width = 80
+    if width is not None and width < 96:
+        # Narrow terminals (e.g. default 80-col macOS Terminal): the wide
+        # ASCII wordmark would wrap and look broken, so use a compact title
+        # instead — same threshold as the OpenTUI banner fallback.
+        console.print(block_renderable(title, Text("VERITAS", style=f"bold {theme.PRIMARY}")))
+    else:
+        # no_wrap keeps wide ASCII art intact instead of reflowing it.
+        logo = Text("\n".join(theme.COMPACT_LOGO), style=f"bold {theme.PRIMARY}", no_wrap=True)
+        console.print(block_renderable(title, logo))
     console.print()
 
 
@@ -43,14 +64,7 @@ def print_panel(
 ) -> None:
     style = style or theme.PRIMARY
     console.print(
-        Panel(
-            Text(body, style=body_style or theme.SECONDARY),
-            title=title,
-            title_align="left",
-            box=theme.PANEL_BOX,
-            style=style,
-            padding=theme.PANEL_PADDING,
-        )
+        block_renderable(title, Text(body, style=body_style or theme.SECONDARY), title_style=style)
     )
     console.print()
 
@@ -61,16 +75,7 @@ def kv_panel(console: Console, title: str, rows: List[tuple], style: Optional[st
     table.add_column("Value", style=theme.SECONDARY)
     for label, value in rows:
         table.add_row(label, value)
-    console.print(
-        Panel(
-            table,
-            title=title,
-            title_align="left",
-            box=theme.PANEL_BOX,
-            style=style or theme.PRIMARY,
-            padding=theme.PANEL_PADDING,
-        )
-    )
+    console.print(block_renderable(title, table, title_style=style))
     console.print()
 
 
@@ -80,16 +85,7 @@ def menu_panel(console: Console, options: List[tuple]) -> None:
     table.add_column("Description", style=theme.SECONDARY)
     for key, label in options:
         table.add_row(f"[{key}]", label)
-    console.print(
-        Panel(
-            table,
-            title="Main Menu",
-            title_align="left",
-            box=theme.PANEL_BOX,
-            style=theme.PRIMARY,
-            padding=theme.PANEL_PADDING,
-        )
-    )
+    console.print(block_renderable("Main Menu", table))
     console.print()
 
 
@@ -101,14 +97,5 @@ def filters_panel(console: Console, toggles: Dict[str, bool], title: str = "Sour
     for i, (name, enabled) in enumerate(toggles.items(), 1):
         status = f"[{theme.SUCCESS}]ON[/{theme.SUCCESS}]" if enabled else f"[{theme.ERROR}]OFF[/{theme.ERROR}]"
         table.add_row(str(i), name.replace("_", " ").title(), status)
-    console.print(
-        Panel(
-            table,
-            title=title,
-            title_align="left",
-            box=theme.PANEL_BOX,
-            style=theme.PRIMARY,
-            padding=theme.PANEL_PADDING,
-        )
-    )
+    console.print(block_renderable(title, table))
     console.print()
