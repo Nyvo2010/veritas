@@ -19,6 +19,11 @@ MUTED = "dim white"
 PANEL_BOX = box.ROUNDED
 PANEL_PADDING = (0, 2)
 
+# Fill for tinted-block Rich panels (TUI look, no ASCII borders).
+# Same zinc as the OpenTUI panels; Rich downgrades it to indexed
+# escapes on 256-color terminals.
+PANEL_BG = "#232326"
+
 # Static VERITAS wordmark. Never animates, never resizes mid-run.
 COMPACT_LOGO = [
     "",
