@@ -1,13 +1,16 @@
-"""Interactive TUI for the Veritas Deep Research Agent."""
+"""Entry point for Veritas: the OpenTUI app, with a Rich CLI fallback."""
 
 import sys
 import os
 import asyncio
+import logging
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
 
 from rich.console import Console
 from rich.prompt import Prompt
+
+from utils import filelog
 
 from ui import theme, screens
 from settings import (
@@ -333,6 +336,11 @@ def start_research(console: Console, agent: DeepResearchAgent, settings: dict):
     except Exception as e:
         console.print()
         screens.print_panel(console, f"Research failed: {e}", "Error", style=theme.ERROR)
+        # A failed run still has findings; keep them rather than losing them.
+        partial = agent.save_report(agent.last_state) if agent.last_state else None
+        if partial:
+            screens.print_panel(console, f"Findings written to {partial}", "Partial Report",
+                                style=theme.WARNING)
         pause(console)
         return
 
@@ -342,7 +350,9 @@ def start_research(console: Console, agent: DeepResearchAgent, settings: dict):
         shown = filename if len(filename) <= 80 else "..." + filename[-77:]
         screens.print_panel(console, f"Saved to {shown}", "Report Saved", style=theme.SUCCESS)
     else:
-        screens.print_panel(console, "Report could not be saved.", "Save Failed", style=theme.ERROR)
+        reason = agent.save_error or "unknown reason"
+        screens.print_panel(console, f"Report could not be saved: {reason}", "Save Failed",
+                            style=theme.ERROR)
     pause(console, "Press Enter to return to main menu")
 
 
@@ -444,14 +454,36 @@ def classic_main():
 
 def main():
     """Launch the OpenTUI app, falling back to the Rich CLI if needed."""
+    # Non-truecolor terminals (Apple Terminal, and others without COLORTERM):
+    # opentui's native engine emits 24-bit SGR runs these emulators cannot
+    # parse, so re-exec this process behind a pty proxy that downconverts
+    # them to xterm-256 on the fly. VS Code / iTerm2 / Ghostty-style
+    # terminals advertise truecolor and skip this entirely.
+    from ui.color_compat import run_proxy, should_proxy
+
+    if should_proxy():
+        run_proxy()  # never returns; re-executes veritas as its child
+
+    # Detailed backend logging goes to a file, never to the screen: the TUI
+    # owns the terminal for the whole session.
+    path = filelog.configure()
+    logging.getLogger("veritas").info(
+        "veritas starting (python %s, %s)", sys.version.split()[0], sys.platform
+    )
     try:
         from tui_app import run as run_tui
-    except ImportError:
+    except ImportError as e:
+        logging.getLogger("veritas").warning("opentui unavailable (%s); using the CLI", e)
         return classic_main()
     try:
         run_tui()
     except KeyboardInterrupt:
         pass
+    except Exception:
+        # After a crash the log file is the only diagnostic there is.
+        logging.getLogger("veritas").exception("the TUI crashed")
+        sys.stderr.write(f"\nVeritas hit an unexpected error. Full detail in {path}\n")
+        raise
 
 
 if __name__ == "__main__":

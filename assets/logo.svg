@@ -4,7 +4,7 @@
        no <rect> behind the glyphs, so whatever sits under the image shows through.
        textLength + lengthAdjust keep every column aligned even when the viewer's
        monospace font has different metrics than the one used to draw the art. -->
-  <g fill="currentColor" color="#6f8fb8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="16.0" font-weight="700" letter-spacing="0">
+  <g fill="currentColor" color="#ffffff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="16.0" font-weight="700" letter-spacing="0">
     <text x="0" y="14.35" textLength="76.8" lengthAdjust="spacing" xml:space="preserve">.sSSS s.</text>
     <text x="0" y="32.75" textLength="796.8" lengthAdjust="spacing" xml:space="preserve">SSSSS SSSs. .sSSSSs.    .sSSSSSSSs. SSSSS .sSSSSSSSSSSSSSs. .sSSSSs.    .sSSSSSSSs.</text>
     <text x="0" y="51.15" textLength="796.8" lengthAdjust="spacing" xml:space="preserve">S SSS SSSSS S SSSSSSSs. S SSS SSSSS S SSS SSSSS S SSS SSSSS S SSSSSSSs. S SSS SSSS'</text>

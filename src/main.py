@@ -7,8 +7,10 @@ import asyncio
 import nest_asyncio
 from typing import Dict, Optional
 from datetime import datetime
+import logging
 import sys
 import os
+import time
 import traceback
 
 # Ensure src root is on sys.path for imports when running scripts from project root
@@ -26,7 +28,9 @@ from agents.synthesis_agent import SynthesisAgent
 from agents.report_generator import ReportGeneratorAgent
 from utils.llm_client import LLMClient
 from utils.tavily_client import TavilySearchClient
+from utils.text import clip
 from utils.ui_manager import UIManager
+from ui.theme import format_duration
 from settings import load_settings, resolve_api_keys, resolve_llm, reports_dir as resolve_reports_dir
 
 from config import (
@@ -34,6 +38,48 @@ from config import (
     TAVILY_API_KEY,
     MAX_RESEARCH_ITERATIONS,
 )
+
+log = logging.getLogger("veritas.research")
+
+
+def _seconds(value: float) -> str:
+    """Short human duration for a log line: "2.4s", "1m 12s"."""
+    return f"{value:.0f}s" if value < 60 else format_duration(value)
+
+
+def _ui_log(ui, level: str, text: str) -> None:
+    """Push one leveled line to the UI (and mirror it into the file log)."""
+    if ui is None or not text:
+        return
+    log.debug("ui[%s] %s", level, text)
+    ui.log(level, text)
+
+
+def _record_time(ui, kind: str, started: float) -> float:
+    """Book one call against the UI's timing ledger; returns its duration."""
+    duration = max(0.0, time.perf_counter() - started)
+    add_timing = getattr(ui, "add_timing", None)
+    if callable(add_timing):
+        add_timing(kind, duration)
+    return duration
+
+
+async def _timed(awaitable, *, kind: str, label: str, ui=None):
+    """Await *awaitable*, book its duration, and log the detail.
+
+    Returns ``(result, seconds)``. Failures are booked too: time spent on a
+    call that blew up is exactly the time you want to see afterwards.
+    """
+    started = time.perf_counter()
+    try:
+        result = await awaitable
+    except Exception:
+        duration = _record_time(ui, kind, started)
+        log.exception("%s failed after %.2fs", label, duration)
+        raise
+    duration = _record_time(ui, kind, started)
+    log.debug("%s finished in %.2fs", label, duration)
+    return result, duration
 
 
 class DeepResearchAgent:
@@ -93,6 +139,10 @@ class DeepResearchAgent:
 
         # Rich console for UI
         self.console = Console()
+        # The state of the most recent run, kept so a caller can still save a
+        # partial report after research() raises.
+        self.last_state: Optional[ResearchState] = None
+        self.save_error: str = ""
 
     async def research(
         self,
@@ -130,6 +180,13 @@ class DeepResearchAgent:
         ui.initialize(estimated_steps, f"Research: {short_query}")
         ui.set_status("Preparing research environment...")
         ui.start()
+        self.last_state = state
+        run_started = time.perf_counter()
+        log.info(
+            "research start: %r (max_iterations=%s, model=%s, sources=%s)",
+            query, max_iterations, self.llm.model,
+            ",".join(name for name, on in self.category_toggles.items() if on) or "none",
+        )
 
         completed = 0
 
@@ -140,9 +197,11 @@ class DeepResearchAgent:
 
             state.reasoning_steps.append("Phase 1: Query Decomposition - Started")
 
-            sub_questions = await asyncio.to_thread(
-                self.query_analyzer.decompose_main_query, query, state, ui
+            sub_questions, elapsed = await _timed(
+                asyncio.to_thread(self.query_analyzer.decompose_main_query, query, state, ui),
+                kind="llm", label="decompose_main_query", ui=ui,
             )
+            _ui_log(ui, "ok", f"Query decomposed into {len(sub_questions)} questions ({_seconds(elapsed)})")
 
             state.reasoning_steps.append(f"Phase 1: Generated {len(sub_questions)} initial research questions")
             completed += 1
@@ -164,6 +223,7 @@ class DeepResearchAgent:
             while iteration < max_iterations and state.question_queue:
                 iteration += 1
                 state.iteration_count = iteration
+                _ui_log(ui, "phase", f"Iteration {iteration} of {max_iter}")
 
                 # Get next question
                 question = state.get_next_question()
@@ -188,13 +248,27 @@ class DeepResearchAgent:
 
                 # Execute search (network wait happens in a worker thread)
                 ui.set_status(f"Iteration {iteration}/{max_iter} - Searching...")
+                _ui_log(
+                    ui, "search",
+                    f"Searching ({search_depth}): {clip(question.question)}",
+                )
 
-                search_results = await self.search_agent.execute_search(
-                    question=question,
-                    state=state,
-                    search_depth=search_depth,
-                    include_full_content=True,
-                    ui_manager=ui
+                search_results, elapsed = await _timed(
+                    self.search_agent.execute_search(
+                        question=question,
+                        state=state,
+                        search_depth=search_depth,
+                        include_full_content=True,
+                        ui_manager=ui,
+                    ),
+                    kind="search", label=f"search[{iteration}] {clip(question.question, 60)}", ui=ui,
+                )
+                log.info("iteration %s: search %r -> %s results in %.2fs",
+                         iteration, question.question, len(search_results), elapsed)
+                _ui_log(
+                    ui, "ok",
+                    f"{len(search_results)} results in {_seconds(elapsed)}"
+                    if search_results else f"no results in {_seconds(elapsed)}",
                 )
 
                 if not search_results:
@@ -223,31 +297,47 @@ class DeepResearchAgent:
                 # Analyze results (blocking LLM call off the event loop)
                 ui.set_status(f"Iteration {iteration}/{max_iter} - Analyzing {len(search_results)} sources...")
 
-                analysis = await asyncio.to_thread(
-                    self.synthesis_agent.analyze_results,
-                    question,
-                    search_results,
-                    state,
-                    ui,
+                analysis, elapsed = await _timed(
+                    asyncio.to_thread(
+                        self.synthesis_agent.analyze_results,
+                        question,
+                        search_results,
+                        state,
+                        ui,
+                    ),
+                    kind="llm", label=f"analyze_results[{iteration}]", ui=ui,
                 )
+                log.info("iteration %s: analyzed %s sources in %.2fs",
+                         iteration, len(search_results), elapsed)
 
                 confidence = analysis.get('confidence', 0.0)
+                _ui_log(
+                    ui, "insight",
+                    f"Answered ({confidence:.0%} confidence, {_seconds(elapsed)}): {clip(question.question)}",
+                )
 
                 state.reasoning_steps.append(f"  Analysis: {confidence:.0%} confidence")
 
                 # Generate follow-up questions if needed
                 if analysis.get("needs_more_research") and iteration < max_iterations - 1:
                     ui.set_status(f"Iteration {iteration}/{max_iter} - Checking for follow-ups...")
-                    follow_ups = await asyncio.to_thread(
-                        self.query_analyzer.generate_follow_up_questions,
-                        question,
-                        analysis,
-                        state,
-                        ui,
+                    follow_ups, elapsed = await _timed(
+                        asyncio.to_thread(
+                            self.query_analyzer.generate_follow_up_questions,
+                            question,
+                            analysis,
+                            state,
+                            ui,
+                        ),
+                        kind="llm", label=f"follow_ups[{iteration}]", ui=ui,
                     )
 
                     if follow_ups:
                         state.reasoning_steps.append(f"  Follow-ups: Generated {len(follow_ups)} follow-up questions")
+                        _ui_log(
+                            ui, "ok",
+                            f"{len(follow_ups)} follow-up questions ({_seconds(elapsed)})",
+                        )
 
                 # Mark question as completed
                 state.mark_question_completed(question.id)
@@ -257,9 +347,13 @@ class DeepResearchAgent:
                 # Periodic gap analysis
                 if iteration % 3 == 0:
                     ui.set_status(f"Iteration {iteration}/{max_iter} - Reviewing knowledge gaps...")
-                    await asyncio.to_thread(
-                        self.query_analyzer.identify_knowledge_gaps, state, ui
+                    gaps, elapsed = await _timed(
+                        asyncio.to_thread(
+                            self.query_analyzer.identify_knowledge_gaps, state, ui
+                        ),
+                        kind="llm", label=f"knowledge_gaps[{iteration}]", ui=ui,
                     )
+                    _ui_log(ui, "ok", f"Gap review found {len(gaps)} gaps ({_seconds(elapsed)})")
 
             # Phase 3: Cross-Reference Findings
             ui.set_phase("Phase 3: Cross-Reference")
@@ -268,15 +362,17 @@ class DeepResearchAgent:
             state.reasoning_steps.append("\nPhase 3: Cross-Reference - Starting cross-reference analysis")
 
             try:
-                await asyncio.to_thread(
-                    self.synthesis_agent.cross_reference_findings, state, ui
+                _, elapsed = await _timed(
+                    asyncio.to_thread(
+                        self.synthesis_agent.cross_reference_findings, state, ui
+                    ),
+                    kind="llm", label="cross_reference", ui=ui,
                 )
+                _ui_log(ui, "ok", f"Findings cross-referenced ({_seconds(elapsed)})")
             except Exception as e:
                 state.reasoning_steps.append(f"Phase 3: cross-reference failed: {e}")
-                ui.add_message(
-                    "Warning: Cross-reference analysis failed, continuing...",
-                    style="white"
-                )
+                log.warning("cross-reference failed: %s", e, exc_info=True)
+                _ui_log(ui, "warn", "Cross-reference failed - continuing without it")
 
             state.reasoning_steps.append("Phase 3: Completed cross-reference analysis")
             completed += 1
@@ -289,19 +385,28 @@ class DeepResearchAgent:
             state.reasoning_steps.append("\nPhase 4: Report Generation - Starting comprehensive report generation")
 
             try:
-                final_report = await asyncio.wait_for(
-                    self.report_generator.generate_report(state, ui, completed),
-                    timeout=900.0  # 15 minute timeout for entire report
+                final_report, elapsed = await _timed(
+                    asyncio.wait_for(
+                        self.report_generator.generate_report(state, ui, completed),
+                        timeout=900.0,  # 15 minute timeout for entire report
+                    ),
+                    kind="llm", label="generate_report", ui=ui,
+                )
+                _ui_log(
+                    ui, "ok",
+                    f"Report written: {len(final_report):,} chars in {_seconds(elapsed)}",
                 )
             except asyncio.TimeoutError:
                 error_msg = "Report generation timed out after 15 minutes"
                 state.reasoning_steps.append(f"Phase 4: {error_msg}")
-                ui.add_message(f"Error: {error_msg}", style="white")
+                log.error(error_msg)
+                _ui_log(ui, "err", error_msg)
                 raise Exception(error_msg)
             except Exception as e:
                 error_msg = f"Report generation failed: {str(e)}"
                 state.reasoning_steps.append(f"Phase 4: {error_msg}")
-                ui.add_message(f"Error: {error_msg}", style="white")
+                log.error(error_msg, exc_info=True)
+                _ui_log(ui, "err", error_msg)
                 raise
 
             # Reconcile the progress total with actual steps taken.
@@ -317,6 +422,15 @@ class DeepResearchAgent:
             # Finalize state
             state.end_time = datetime.now()
             duration = (state.end_time - state.start_time).total_seconds()
+            ledger = getattr(ui, "timings", None)
+            log.info(
+                "research complete in %.1fs: %s iterations, %s questions, %s searches, "
+                "%s findings, %s gaps, report %s chars%s",
+                duration, state.iteration_count, len(state.completed_questions),
+                state.total_searches, len(state.findings), len(state.gaps),
+                len(final_report),
+                f"; {ledger.summary()}" if ledger is not None else "",
+            )
 
             # Summary (printed after the live display has stopped)
             from rich.table import Table
@@ -348,6 +462,7 @@ class DeepResearchAgent:
 
         except Exception as e:
             # Ensure UI is cleaned up even if there's an error
+            log.error("research failed after %.1fs: %s", time.perf_counter() - run_started, e)
             ui.stop()
 
             if verbose:
@@ -400,26 +515,40 @@ class DeepResearchAgent:
 
     def save_report(self, state: ResearchState, filename: str = None) -> str:
         """
-        Save the final report to a file
+        Write the report to disk.
+
+        A finished run writes its final report. A run that failed or was
+        stopped part-way still has findings, so a clearly-labelled partial
+        report is written instead of nothing at all. The reason is left in
+        ``self.save_error`` whenever the write does not happen or fails.
 
         Args:
-            state: Research state with final report
+            state: Research state to save
             filename: Output filename (default: auto-generated in the
                 configured reports directory)
 
         Returns:
-            The filename where the report was saved, or None on failure
+            The path written, or None when there was nothing to save
         """
-        if not state.final_report:
+        self.save_error = ""
+        body = state.final_report or self.build_partial_report(state)
+        if not body:
+            self.save_error = "nothing to save: the run produced no report or findings"
+            log.error("save skipped: %s", self.save_error)
             return None
 
         if not filename:
             # Generate filename from query
             safe_query = "".join(c for c in state.main_query if c.isalnum() or c in (' ', '-', '_'))
-            safe_query = safe_query[:50].strip().replace(' ', '_')
+            safe_query = safe_query[:50].strip().replace(' ', '_') or "query"
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             directory = resolve_reports_dir(self._settings)
-            os.makedirs(directory, exist_ok=True)
+            try:
+                os.makedirs(directory, exist_ok=True)
+            except OSError as e:
+                self.save_error = f"cannot create the reports folder {directory}: {e}"
+                log.error("save failed: %s", self.save_error)
+                return None
             filename = os.path.join(directory, f"research_report_{safe_query}_{timestamp}.md")
         else:
             parent = os.path.dirname(os.path.abspath(filename))
@@ -428,10 +557,42 @@ class DeepResearchAgent:
 
         try:
             with open(filename, 'w', encoding='utf-8') as f:
-                f.write(state.final_report)
-            return filename
-        except Exception:
+                f.write(body)
+        except OSError as e:
+            self.save_error = f"cannot write {filename}: {e}"
+            log.error("save failed: %s", self.save_error)
             return None
+        log.info("report saved to %s (%s chars%s)", filename, len(body),
+                 ", partial" if not state.final_report else "")
+        return filename
+
+    def build_partial_report(self, state: ResearchState = None) -> str:
+        """Assemble whatever a stopped or failed run managed to produce."""
+        state = state if state is not None else self.last_state
+        if state is None:
+            return ""
+        if state.report_sections:
+            body = "\n\n".join(
+                f"{section.title.upper()}\n\n{section.content}"
+                for section in sorted(state.report_sections, key=lambda s: s.order)
+            )
+        elif state.findings:
+            body = "\n\n".join(
+                f"- {finding.content}\n  Sources: {', '.join(finding.sources[:3])}"
+                for finding in state.findings
+            )
+        else:
+            return ""
+        answered = [q for q in state.completed_questions]
+        header = (
+            f"Research Report (partial): {state.main_query}\n\n"
+            "This run did not finish, so nothing was summarised or cross-checked "
+            "here. It contains the raw findings collected before it stopped.\n\n"
+            f"Questions answered: {len(answered)}\n"
+            f"Sources consulted: {len(state.search_results)}\n\n"
+            + "\u2550" * 80 + "\n\n"
+        )
+        return header + body
 
     def set_category_toggle(self, category: str, enabled: bool, silent: bool = False):
         """

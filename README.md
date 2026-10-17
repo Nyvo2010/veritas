@@ -1,4 +1,4 @@
-<p align="center"><img src="https://raw.githubusercontent.com/Nyvo2010/veritas/main/assets/logo.svg" alt="Veritas" width="560"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/Nyvo2010/veritas/main/assets/mockup.png" alt="Veritas" width="560"></p>
 
 <p align="center"><sub>Made by Nyvø w/ love · Powered by Tavily</sub></p>
 
@@ -29,6 +29,9 @@ with the same features:
 pip install veritas
 ```
 
+The `veritas` command installs to your Python scripts directory (on Linux/macOS
+usually `~/.local/bin`, which has to be on `PATH`).
+
 From source:
 
 ```bash
@@ -49,6 +52,23 @@ Keys: `↑`/`↓` move · `Enter` select · `Esc` back · `q` quit (menu) ·
 Long lists scroll, with `↑ N more` / `↓ N more` markers so the highlighted row
 is always visible. Model pickers also accept typing: start typing to filter the
 `/models` list, or type an id that isn't listed and press `Enter` to use it.
+
+## While research runs
+
+The run screen keeps three things on one screen: the query and current phase,
+a scrolling activity log where each phase and iteration is its own heading, and
+a braille progress bar — the left side fills as steps complete while particles
+drift in from the right.
+
+Below the bar, the elapsed time, a rough ETA, and a **time breakdown** show how
+much of the run went to model inference versus web search, with call counts.
+That is the quickest way to tell whether a slow run is the model or the search
+API.
+
+Every run keeps its activity log in memory: press `l` on the results screen, or
+pick **Last run log** from the menu, to scroll back through it.
+
+`Ctrl+C` stops the run and writes whatever is finished (see below).
 
 ## Settings vs environment variables
 
@@ -86,11 +106,51 @@ src/
   agents/          query analysis, search, synthesis, report generation
   utils/llm_client.py    any OpenAI-compatible chat API + /models discovery
   utils/tavily_client.py web search
-  ui/              theme tokens, live renderer, shared screens
+  utils/filelog.py       detailed backend log (file only)
+  utils/text.py          shared text helpers
+  ui/              theme tokens, braille bar, live renderer, shared screens
+  ui/timings.py    where a run spends its time (model vs search)
 ```
 
+## Reports
+
 Reports are written to `~/Veritas/reports` by default (override in Settings or
-with `VERITAS_REPORTS_DIR`); nothing is written into the repository.
+with `VERITAS_REPORTS_DIR`) as `research_report_<query>_<timestamp>.md`; nothing
+is written into the repository.
+
+If a run fails or is stopped early, Veritas still writes a clearly-labelled
+partial report from the findings collected so far rather than losing the work —
+so a file appears even when a run does not finish. The results screen shows the
+path, or exactly why the write did not happen.
+
+## Logs
+
+Nothing the backend logs ever reaches the screen: the TUI owns the terminal.
+Detail goes to a rolling file instead, `~/.config/veritas/logs/veritas.log`
+(mode `0600`, 2 MB per file, 3 files): every phase and iteration, every model
+call with its model id, prompt size, duration, token usage and finish reason,
+retries and backoff, fallback switches, and every search with its query, depth,
+result count and duration.
+
+```bash
+VERITAS_LOG_LEVEL=INFO veritas     # quieter file log (default: DEBUG)
+VERITAS_LOG_CONSOLE=1 veritas      # also stream warnings to stderr
+```
+
+The log can contain the prompts and queries you typed. It stays on your machine
+and is never uploaded.
+
+## Development
+
+```bash
+python -m unittest discover -s tests    # no extra dependencies
+```
+
+## Roadmap
+
+- an npm wrapper so `npx veritas` works for people without Python
+- test coverage beyond the UI primitives
+- screenshots in this README
 
 ## License
 

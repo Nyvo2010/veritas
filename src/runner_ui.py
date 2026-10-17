@@ -12,36 +12,17 @@ Kinds emitted:
   ("phase", text)
   ("progress", completed, total, status)
   ("done", ok)
+
+Timing is not an event: the orchestrator calls add_timing() directly and the
+frontend polls :attr:`QueueUI.timings` on its own render tick.
 """
 
 import queue
-import re
 import threading
 import time
 
-_MARKUP_RE = re.compile(r"\[(?:/[a-z ]+|[a-z][a-z ]*)\]", re.IGNORECASE)
-
-
-def strip_markup(text: str) -> str:
-    cleaned = _MARKUP_RE.sub("", text or "")
-    return " ".join(cleaned.split())
-
-
-def classify_message(message: str) -> str:
-    lowered = message.lower()
-    if "phase" in lowered:
-        return "phase"
-    if "searching" in lowered:
-        return "search"
-    if "key insight" in lowered:
-        return "insight"
-    if "completed:" in lowered or "saved" in lowered or "found" in lowered:
-        return "ok"
-    if "error" in lowered or "failed" in lowered:
-        return "err"
-    if "warn" in lowered or "gap" in lowered:
-        return "warn"
-    return "info"
+from ui.timings import Timings
+from utils.text import classify_message, strip_markup
 
 
 class QueueUI:
@@ -57,6 +38,7 @@ class QueueUI:
         self.completed_steps = 0.0
         self.start_time = time.time()
         self.done_ok = None
+        self.timings = Timings()
 
     @property
     def renderer(self) -> "QueueUI":
@@ -126,6 +108,10 @@ class QueueUI:
         with self._lock:
             self.status = status
         self.events.put(("status", status))
+
+    def add_timing(self, kind: str, seconds: float) -> None:
+        """Record how long one blocking call took ("llm" or "search")."""
+        self.timings.add(kind, seconds)
 
     # -- log --------------------------------------------------------------
     def log(self, level: str, text: str) -> None:

@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import logging
 from tavily import TavilyClient
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("veritas.tavily")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -55,8 +55,8 @@ class TavilySearchClient:
             delay = self.retry_delay * (2 ** attempt)
         else:
             delay = self.retry_delay
-        
-        log.debug(f"   {error_msg}. Retrying in {delay}s... ({attempt + 1}/{self.max_retries})")
+
+        log.warning("%s: retrying in %ss (%s/%s)", error_msg, delay, attempt + 1, self.max_retries)
         time.sleep(delay)
         return True
     
@@ -98,7 +98,13 @@ class TavilySearchClient:
             category_toggles: Dict of category filters
         """
         attempt = 0
-        
+        started = time.perf_counter()
+        log.info(
+            "search -> %r | depth=%s, max_results=%s, topic=%s, time_range=%s, raw=%s, answer=%s",
+            query, search_depth, max_results, topic, time_range,
+            include_raw_content, include_answer,
+        )
+
         while attempt < self.max_retries:
             try:
                 # Build exclude domains list from category toggles
@@ -125,44 +131,63 @@ class TavilySearchClient:
                     search_params["exclude_domains"] = exclude_domains[:150]  # Max 150
                 
                 # Perform search
+                log.debug("search params: %s", search_params)
                 response = self.client.search(**search_params)
                 
                 # Add categories to results
                 if "results" in response:
                     for result in response["results"]:
                         result["category"] = self._categorize_url(result.get("url", ""))
-                
+
+                results = response.get("results", []) if isinstance(response, dict) else []
+                log.info(
+                    "search <- %r in %.2fs | %s results, %s categories%s",
+                    query, time.perf_counter() - started, len(results),
+                    len({r.get("category") for r in results}),
+                    f", answer: {str(response.get('answer'))[:120]}" if response.get("answer") else "",
+                )
+                for rank, result in enumerate(results[:10], 1):
+                    log.debug(
+                        "  result %s: score=%s category=%s %s | %s",
+                        rank, result.get("score"), result.get("category"),
+                        result.get("url"), str(result.get("title"))[:80],
+                    )
+
                 return response
             
             except requests.exceptions.Timeout as e:
-                log.debug(f"   Tavily timeout error: {e}")
+                log.warning("tavily timeout (attempt %s/%s): %s", attempt + 1, self.max_retries, e)
                 if not self._handle_retry(attempt, "Request timeout"):
                     raise Exception(f"Tavily search timeout after {self.max_retries} attempts")
                 attempt += 1
             
             except requests.exceptions.HTTPError as e:
+                status = getattr(e.response, "status_code", "?")
                 if e.response.status_code == 429:  # Rate limit
-                    log.debug("   Tavily rate limit hit")
+                    log.warning("tavily rate limit (attempt %s/%s)", attempt + 1, self.max_retries)
                     if not self._handle_retry(attempt, "Rate limit"):
                         raise Exception(f"Tavily rate limit exceeded after {self.max_retries} attempts")
                     attempt += 1
                 elif e.response.status_code >= 500:  # Server error
-                    log.debug(f"   Tavily server error: {e.response.status_code}")
+                    log.warning("tavily server error %s (attempt %s/%s)",
+                                status, attempt + 1, self.max_retries)
                     if not self._handle_retry(attempt, "Server error"):
                         raise Exception(f"Tavily server error after {self.max_retries} attempts")
                     attempt += 1
                 else:
-                    log.debug(f"   Tavily HTTP error: {e}")
+                    log.error("tavily HTTP %s for %r: %s", status, query, e)
                     raise Exception(f"Tavily API error: {e}")
             
             except requests.exceptions.RequestException as e:
-                log.debug(f"   Tavily request error: {e}")
+                log.warning("tavily request failed (attempt %s/%s): %s",
+                            attempt + 1, self.max_retries, e)
                 if not self._handle_retry(attempt, "Request failed"):
                     raise Exception(f"Tavily request failed after {self.max_retries} attempts")
                 attempt += 1
             
             except Exception as e:
-                log.debug(f"   Unexpected error in Tavily search: {e}")
+                log.warning("unexpected tavily error (attempt %s/%s): %s",
+                            attempt + 1, self.max_retries, e)
                 if attempt >= self.max_retries - 1:
                     raise Exception(f"Tavily search failed: {e}")
                 time.sleep(self.retry_delay)

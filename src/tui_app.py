@@ -5,7 +5,7 @@ Screens (all keyboard driven):
   query         free-text question
   iterations    max iterations (1-20, defaults from settings)
   sources       per-run source toggles + Start research
-  run           live spinner + progress bar + scrolling activity log
+  run           live braille progress bar + scrolling activity log
   done          result stats or error, back to menu
   settings      current values + editors
   set-theme / set-reports / set-provider / set-endpoint / set-llm-key /
@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '.'))
 from opentui import (
     Box,
     Input,
+    Row,
     Signal,
     Text,
     component,
@@ -57,53 +58,27 @@ from settings import (
     resolve_llm,
     update_settings,
 )
-from ui import theme
-from ui import termcap
+from ui import theme, timings
+from ui.color_compat import run_proxy, should_proxy
 from runner_ui import QueueUI
 from utils.llm_client import fetch_models
 from main import DeepResearchAgent
 
 
 # --------------------------------------------------------------------------
-# Palette — one accent, low saturation, consistent neutrals.
+# Palette — imported from ui.theme: one source shared by both frontends.
 # --------------------------------------------------------------------------
 
-ACCENTS = {
-    "blue": "#6f8fb8",       # dusty blue (default)
-    "green": "#7d9b76",      # sage
-    "cyan": "#5f9ea0",       # muted cadet teal
-    "magenta": "#9a7fa8",    # muted mauve
-    "amber": "#b3945e",      # muted brass
-    "red": "#b86767",        # muted brick
-    "orange": "#b07d4f",     # muted copper
-    "purple": "#8a7fa8",     # muted lavender
-    "white": "#c9c9c9",      # soft white
-}
+ACCENTS = theme.ACCENTS
 
-PANEL_BG = "#232326"        # neutral zinc, no color cast
-TITLE_FG = "#1c1c1e"        # near-black for selected rows / title bars
-SECONDARY = "#8e8e93"       # descriptions, values
-TERTIARY = "#636366"        # hints, footnotes
-SUBTITLE = "#707074"        # dimmer than body, softer than hints
-DANGER = "#b86767"          # muted brick for errors
-WARNING = "#b3945e"         # muted brass for warnings
-INFO = "#6f8fb8"            # dusty blue for neutral notices
-
-# Terminal consistency: Terminal.app and other 256-color terminals quantize
-# 24-bit escapes on their own terms (hue shifts, washed-out grays, banded
-# gradients). Snapping once at startup keeps the palette deterministic
-# everywhere; truecolor terminals keep the exact hex values above.
-TRUECOLOR = termcap.supports_truecolor()
-if not TRUECOLOR:
-    ACCENTS = {name: termcap.to_256(value) for name, value in ACCENTS.items()}
-    PANEL_BG = termcap.to_256(PANEL_BG)
-    TITLE_FG = termcap.to_256(TITLE_FG)
-    SECONDARY = termcap.to_256(SECONDARY)
-    TERTIARY = termcap.to_256(TERTIARY)
-    SUBTITLE = termcap.to_256(SUBTITLE)
-    DANGER = termcap.to_256(DANGER)
-    WARNING = termcap.to_256(WARNING)
-    INFO = termcap.to_256(INFO)
+PANEL_BG = theme.PANEL_BG
+TITLE_FG = theme.TITLE_FG
+SECONDARY = theme.SECONDARY
+TERTIARY = theme.TERTIARY
+SUBTITLE = theme.SUBTITLE
+DANGER = theme.DANGER
+WARNING = theme.WARNING
+INFO = theme.INFO
 
 LOG_GLYPH = {
     "phase": "*",
@@ -112,8 +87,10 @@ LOG_GLYPH = {
     "ok": "+",
     "warn": "!",
     "err": "x",
-    "info": ".",
+    "info": "·",
 }
+
+LOG_LIMIT = 300             # log lines kept in memory for a run
 
 # One meaning per notice kind, used by every message in the app.
 NOTICE_STYLE = {
@@ -135,10 +112,17 @@ THEME_BLURBS = {
 }
 
 # Shared geometry so every screen lines up on the same grid.
+#
+# Spacing rule, enforced by page()/panel()/input_frame() below: every block on
+# a screen is separated by exactly one blank line, and the notice always sits
+# directly above the hint so content never moves when a notice appears.
 MARGIN_X = 2                # outer margin from the terminal edge
+MARGIN_TOP = 1              # one blank line between the terminal's top edge and the UI
 PANEL_PAD_X = 2             # padding inside every panel
 INPUT_WIDTH = 64            # shared width for every text input
 MAX_VISIBLE = 8             # list rows shown at once
+ANIM_SECONDS = 0.09         # per animation frame: run clock + bar particles
+ANIM_TRAVEL = 1.3           # bar cells a particle covers per animation frame
 
 
 # --------------------------------------------------------------------------
@@ -182,6 +166,7 @@ BACK = {
     "setup-reports": "setup-tavily",
     "setup-theme": "setup-reports",
     "setup-done": None,
+    "logs": "menu",
 }
 
 
@@ -223,7 +208,7 @@ def auto_visible() -> int:
     Panels here show up to two lines per option (title + subtitle); the
     remaining rows hold the banner, panel chrome, hints, and notices.
     """
-    return max(3, min(MAX_VISIBLE, (term_height() - 10) // 2))
+    return max(3, min(MAX_VISIBLE, (term_height() - 10 - MARGIN_TOP) // 2))
 
 
 def inner_width() -> int:
@@ -235,12 +220,41 @@ def accent() -> str:
     return ACCENTS.get(str(settings_sig().get("theme", "blue")), ACCENTS["blue"])
 
 
+def on_accent() -> str:
+    """Readable text for accents used as backgrounds: saturated accents (blue,
+    red, purple…) need white text, light accents (white, amber) need black."""
+    hexv = accent().lstrip("#")
+    r, g, b = (int(hexv[i:i+2], 16) for i in (0, 2, 4))
+    luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    return TITLE_FG if luminance > 140 else "#ffffff"
+
+
+def log_color(level: str) -> str:
+    """Body text for most levels: only phases, warnings, and errors pop."""
+    if level == "phase":
+        return accent()
+    if level == "err":
+        return DANGER
+    if level == "warn":
+        return WARNING
+    if level == "info":
+        return SUBTITLE
+    return SECONDARY
+
+
 def banner_lines() -> list:
-    # The wide wordmark needs both room to breathe and vertical space; on
-    # shorter terminals the plain title keeps the menu on one screen.
-    if term_width() >= 96 and term_height() >= 32:
-        return list(theme.COMPACT_LOGO)
-    return ["VERITAS"]
+    """Wordmark lines with their own blank padding stripped.
+
+    The wide wordmark needs both room to breathe and vertical space; on
+    shorter terminals the plain title keeps the menu on one screen. The
+    layout adds the spacing, so the banner must not carry blanks of its own.
+    """
+    lines = list(theme.COMPACT_LOGO) if term_width() >= 96 and term_height() >= 32 else ["VERITAS"]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
 
 
 def gap(rows: int = 1) -> Text:
@@ -252,42 +266,9 @@ def hint(text: str) -> Text:
     return Text(text, fg=TERTIARY)
 
 
-def _hex_to_rgb(value: str) -> tuple:
-    value = value.lstrip("#")
-    return tuple(int(value[i : i + 2], 16) for i in (0, 2, 4))
-
-
-def _rgb_to_hex(rgb: tuple) -> str:
-    return "#{:02x}{:02x}{:02x}".format(*[max(0, min(255, int(c))) for c in rgb])
-
-
-def shade(value: str, factor: float) -> str:
-    """Lighten (factor > 1) or darken (factor < 1) a hex color toward white/black."""
-    r, g, b = _hex_to_rgb(value)
-    if factor >= 1:
-        t = min(factor - 1, 1)
-        r, g, b = r + (255 - r) * t, g + (255 - g) * t, b + (255 - b) * t
-    else:
-        r, g, b = r * factor, g * factor, b * factor
-    return _rgb_to_hex((r, g, b))
-
-
-def logo_lines(tick: int) -> list:
-    """Banner with a slow tonal shimmer: same accent family, top lighter,
-    a soft wave traveling downward. Subtle on purpose."""
-    lines = banner_lines()
-    if not TRUECOLOR:
-        # Without truecolor a shade wave bands into visible steps, so keep
-        # the banner a flat accent instead.
-        return [Text(line, fg=accent()) for line in lines]
-    total = max(len(lines) - 1, 1)
-    base = accent()
-    out = []
-    for i, line in enumerate(lines):
-        vertical = 1.20 - 0.40 * (i / total)  # lighter crown, deeper base
-        wave = 0.5 + 0.5 * math.sin(tick * 0.30 - i * 0.55)
-        out.append(Text(line, fg=shade(base, vertical * (0.90 + 0.20 * wave))))
-    return out
+def logo_lines() -> list:
+    """Banner in the single accent color. Flat, no gradients, no animation."""
+    return [Text(line, fg=accent()) for line in banner_lines()]
 
 
 def fit(text: str, width: int) -> str:
@@ -320,8 +301,12 @@ def kv_rows(pairs: list) -> list:
 
 
 def make_input(**kw) -> Input:
-    """Every text input shares one width and focus behavior."""
-    kw.setdefault("width", INPUT_WIDTH)
+    """Every text input shares one width and focus behavior.
+
+    Width follows the live terminal: a fixed 64-wide input overflows its
+    panel on narrow panes (<72 cols), which shoves the layout sideways.
+    """
+    kw.setdefault("width", max(20, min(INPUT_WIDTH, inner_width())))
     kw.setdefault("focused", True)
     return Input(**kw)
 
@@ -370,17 +355,23 @@ def panel(title: str, *children) -> Box:
         bg=PANEL_BG,
         padding_y=1,
         padding_x=PANEL_PAD_X,
+        width="100%",
     )
 
 
-def page(*children) -> Box:
-    """Page skeleton: shared side margins, plus the active notice if any."""
-    parts: list = []
+def page(*children, footer=None) -> Box:
+    """Page skeleton: side margins, blocks, then the notice and the footer.
+
+    The notice is rendered after the blocks so it never pushes them around:
+    the panel above stays put and only the footer line moves, on every screen.
+    """
+    parts = list(children)
     notice = notice_row()
     if notice is not None:
-        parts.extend([notice, gap()])
-    parts.extend(children)
-    return Box(*parts, padding_x=MARGIN_X)
+        parts.append(notice)
+    if footer is not None:
+        parts.append(footer)
+    return Box(*parts, padding_x=MARGIN_X, padding_top=MARGIN_TOP, width="100%")
 
 
 def list_hint(enter: str, back: str = None, search: bool = False) -> Text:
@@ -394,17 +385,15 @@ def list_hint(enter: str, back: str = None, search: bool = False) -> Text:
 
 
 def input_frame(title: str, lines: list, inp, enter: str, back: str, kind: str = "Type") -> Box:
-    """Text-entry skeleton: prompts, breathing room, input, inline notice."""
-    interior: list = []
-    for i, line in enumerate(lines):
-        interior.append(line)
-        if i < len(lines) - 1:
-            interior.append(gap())
-    interior.extend([gap(), inp, notice_row() or Text("", fg=DANGER)])
+    """Text-entry skeleton: prompt lines, one blank line, the field, the hint."""
+    interior = list(lines)
+    if interior:
+        interior.append(gap())   # one blank line between the prompt and the field
+    interior.append(inp)
     return page(
         panel(title, *interior),
         gap(),
-        hint(f"{kind} · Enter {enter} · Esc {back}"),
+        footer=hint(f"{kind} · Enter {enter} · Esc {back}"),
     )
 
 
@@ -418,9 +407,10 @@ log_sig = Signal(())
 prog_sig = Signal((0.0, 1, "Starting..."))
 phase_sig = Signal("Preparing...")
 elapsed_sig = Signal("0s")
-spin_sig = Signal(0)
-tick_sig = Signal(0)
+anim_sig = Signal(0)          # monotonic frame counter for the bar's particles
+stats_sig = Signal(())        # ((kind, seconds, calls), ...) for the timing line
 list_sig = Signal(0)          # bumped whenever a list selection/window changes
+input_sig = Signal(0)         # bumped on every key routed to a text input
 notice_sig = Signal(None)     # None | (kind, text) with kind in NOTICE_STYLE
 # None = loading, ("ok", [ids]) | ("err", message) | ("manual", "")
 models_sig = Signal(None)
@@ -447,7 +437,7 @@ inputs: dict = {}
 renderer_ref: dict = {}
 _keyboard_bound: dict = {}
 _frame_bound: dict = {}
-_frame_state = {"tick": 0.0, "spin": 0.0}
+_frame_state = {"anim": 0.0}
 
 
 def set_notice(kind: str, text: str) -> None:
@@ -470,8 +460,19 @@ def notice_row():
 
 
 def request_quit() -> None:
-    """Stop any running research and ask the renderer to exit."""
-    state["research_stop"] = True
+    """Stop any running research and ask the renderer to exit.
+
+    The worker is blocked in a model or network call that quitting cannot
+    interrupt, so what it has produced so far is written from here first —
+    otherwise Ctrl+C throws away every finding collected so far.
+    """
+    if state.get("run_active") and not state.get("research_stop"):
+        state["research_stop"] = True
+        path, error = _save_partial(state.get("agent"))
+        if path:
+            set_notice("warn", f"Stopped early — partial report saved to {path}")
+        elif error:
+            set_notice("error", f"Stopped early — nothing could be saved: {error}")
     renderer = renderer_ref.get("r")
     if renderer is not None:
         try:
@@ -562,14 +563,14 @@ def list_rows(name: str, visible: int = None) -> list:
         selected = i == index
         label = fit(item["label"], width)
         if selected:
-            out.append(Text((" " + label).ljust(width), bg=accent(), fg=TITLE_FG, bold=True))
+            out.append(Text((" " + label).ljust(width), bg=accent(), fg=on_accent(), bold=True))
         else:
-            out.append(Text(" " + label))
+            out.append(Text(" " + label, fg=item.get("fg")))
         subtitle = item.get("subtitle")
         if subtitle:
             sub = fit(subtitle, width - 2)
             if selected:
-                out.append(Text(("  " + sub).ljust(width), bg=accent(), fg=TITLE_FG))
+                out.append(Text(("  " + sub).ljust(width), bg=accent(), fg=on_accent()))
             else:
                 out.append(Text("  " + sub, fg=SUBTITLE))
 
@@ -601,23 +602,44 @@ def kick_model_fetch(base_url: str, api_key: str) -> None:
     threading.Thread(target=_go, daemon=True).start()
 
 
+def _after_text_change() -> None:
+    """Re-layout after the value of the focused field changed.
+
+    A native repaint of the input alone accumulates a horizontal panel offset
+    in this OpenTUI build (the text drifts right), so the whole tree has to be
+    rebuilt. Typing, pasting, and deleting all go through here.
+    """
+    current = screen()
+    target = inputs.get(current)
+    if target is not None and current in SEARCH_SCREENS:
+        state["search"][current] = target.value
+    input_sig.set(input_sig.peek() + 1)
+
+
 def _on_paste(event) -> None:
-    """Bracketed paste lands here; forward it to the focused input.
+    """Bracketed paste lands here; forward it to the focused field.
 
     Module-level so the hook dedup keeps exactly one registration.
-    Newlines collapse to spaces: every input here is single-line.
+    Newlines collapse to spaces: every field here is single-line.
     """
-    target = inputs.get(screen())
-    text = getattr(event, "text", "") or ""
-    text = str(text).replace("\r", " ").replace("\n", " ")
-    if target is None or not text:
+    current = screen()
+    text = str(getattr(event, "text", "") or "")
+    text = text.replace("\r", " ").replace("\n", " ").strip()
+    if not text:
         return
+    target = inputs.get(current)
     try:
         clear_notice()
-        target.insert_text(text)
-        target._cursor_position = len(target._value)
-        if screen() in SEARCH_SCREENS:
-            state["search"][screen()] = target.value
+        if target is not None:
+            target.insert_text(text)
+            target._cursor_position = len(target._value)
+        elif current in SEARCH_SCREENS:
+            # Model picker in list mode: the paste is a filter, not a value.
+            state["search"][current] = (state["search"].get(current, "") + text)
+            set_cursor(current, 0)
+        else:
+            return
+        _after_text_change()
     except Exception:
         pass
 
@@ -630,9 +652,11 @@ def apply_event(ev: tuple) -> None:
     kind = ev[0]
     if kind == "log":
         _, level, text = ev
-        glyph = LOG_GLYPH.get(level, ".")
-        lines = log_sig() + ((level, f"{glyph} {text}"),)
-        log_sig.set(lines[-300:])
+        # Entries carry the run clock so the log reads as a timeline and slow
+        # steps are visible at a glance.
+        elapsed = time.time() - state.get("run_start", time.time())
+        entries = log_sig() + ((elapsed, level, text),)
+        log_sig.set(entries[-LOG_LIMIT:])
     elif kind == "status":
         completed, total, _ = prog_sig()
         prog_sig.set((completed, total, ev[1]))
@@ -651,13 +675,6 @@ def _on_frame(delta_time: float) -> None:
     input handling (key presses then get dropped). Worker threads only publish
     plain data; this once-per-renderer callback applies it at a fixed cadence.
     """
-    # Banner shimmer — menu only, ~7 fps.
-    if screen.peek() == "menu":
-        _frame_state["tick"] += delta_time
-        if _frame_state["tick"] >= 0.15:
-            _frame_state["tick"] = 0.0
-            tick_sig.set(tick_sig.peek() + 1)
-
     # Model discovery result from its fetch thread.
     result = state.get("models_result")
     if result is not None and state.get("models_applied") is not result:
@@ -672,19 +689,26 @@ def _on_frame(delta_time: float) -> None:
                 apply_event(ui.events.get_nowait())
         except queue.Empty:
             pass
-        _frame_state["spin"] += delta_time
-        if _frame_state["spin"] >= 0.09:
-            _frame_state["spin"] = 0.0
-            spin_sig.set((spin_sig.peek() + 1) % len(theme.SPINNER_FRAMES))
+        _frame_state["anim"] += delta_time
+        if _frame_state["anim"] >= ANIM_SECONDS:
+            _frame_state["anim"] = 0.0
+            anim_sig.set(anim_sig.peek() + 1)
             elapsed_sig.set(theme.format_duration(time.time() - state["run_start"]))
+        # Where the time is going: poll the worker's timing ledger.
+        snapshot = ui.timings.snapshot()
+        if snapshot != stats_sig.peek():
+            stats_sig.set(snapshot)
         if state.get("run_done"):
             state["run_active"] = False
             screen.set("done")
 
 
 def worker(query: str, max_iter: int, toggles: dict) -> None:
+    agent = None
     try:
         agent = DeepResearchAgent(category_toggles=dict(toggles))
+        # Published so quitting mid-run can still save what exists.
+        state["agent"] = agent
         ui = state["ui"]
         st = asyncio.run(agent.research(query, max_iterations=max_iter, verbose=False, ui=ui))
         saved = agent.save_report(st)
@@ -699,12 +723,32 @@ def worker(query: str, max_iter: int, toggles: dict) -> None:
             "gaps": len(st.gaps),
             "report_len": len(st.final_report or ""),
             "saved": saved,
+            "save_error": agent.save_error,
         }
     except Exception as e:  # noqa: BLE001 - surfaced on the done screen
-        state["result"] = {"ok": False, "error": str(e)}
+        # The run stopped early, but the findings are still worth keeping: try
+        # to save a partial report rather than throwing the work away.
+        saved, save_error = _save_partial(agent)
+        state["result"] = {
+            "ok": False,
+            "error": str(e),
+            "saved": saved,
+            "save_error": save_error,
+        }
     finally:
         # Hand the result back to the frame callback; never touch signals here.
         state["run_done"] = not state["research_stop"]
+
+
+def _save_partial(agent) -> tuple:
+    """Best-effort save of an unfinished run; returns (path, error)."""
+    if agent is None or getattr(agent, "last_state", None) is None:
+        return "", ""
+    try:
+        path = agent.save_report(agent.last_state)
+    except Exception as e:  # noqa: BLE001 - reported on the done screen
+        return "", str(e)
+    return path or "", agent.save_error
 
 
 def start_run() -> None:
@@ -713,6 +757,8 @@ def start_run() -> None:
     prog_sig.set((0.0, 1, "Starting..."))
     phase_sig.set("Preparing...")
     elapsed_sig.set("0s")
+    anim_sig.set(0)
+    stats_sig.set(())
     state["result"] = None
     state["run_done"] = False
     state["run_active"] = True
@@ -757,7 +803,7 @@ def model_screen(name: str, title: str, base_url: str, api_key: str,
         return page(
             panel(title, Text("Loading models…", fg=SECONDARY)),
             gap(),
-            hint("Esc back"),
+            footer=hint("Esc back"),
         )
 
     if not isinstance(res, tuple) or res[0] in ("err", "manual"):
@@ -817,7 +863,7 @@ def model_screen(name: str, title: str, base_url: str, api_key: str,
     return page(
         panel(title, search_line, gap(), *list_rows(name)),
         gap(),
-        hint(f"{footer} · ↑↓ move · Type to search · Enter use · Esc back"),
+        footer=hint(f"{footer} · ↑↓ move · Type to search · Enter use · Esc back"),
     )
 
 
@@ -835,21 +881,34 @@ def screen_menu() -> Box:
             go("query")
         elif value == "settings":
             go("settings")
+        elif value == "logs":
+            go("logs")
         elif value == "quit":
             request_quit()
 
-    register_list("menu", [
+    items = [
         {"label": "New research", "value": "new", "subtitle": "Answer a question with deep web research"},
+    ]
+    # Only offer the log once there is one to read.
+    entries = log_sig()
+    if entries:
+        items.append({
+            "label": "Last run log",
+            "value": "logs",
+            "subtitle": f"{len(entries)} lines from the previous run",
+        })
+    items.extend([
         {"label": "Settings", "value": "settings", "subtitle": "Theme, AI provider, search, defaults"},
         {"label": "Quit", "value": "quit", "subtitle": "Exit Veritas"},
-    ], activate, visible=3)
+    ])
+    register_list("menu", items, activate, visible=len(items))
 
     return page(
-        Box(*logo_lines(tick_sig())),
-        gap(),
+        Box(*logo_lines()),
+        gap(1),
         panel("Main menu", *list_rows("menu")),
         gap(),
-        hint("↑↓ move · Enter select · q quit"),
+        footer=hint("↑↓ move · Enter select · q quit"),
     )
 
 
@@ -941,44 +1000,81 @@ def screen_sources() -> Box:
             *list_rows("sources"),
         ),
         gap(),
-        hint("↑↓ move · Enter toggle · Esc back"),
+        footer=hint("↑↓ move · Enter toggle · Esc back"),
     )
 
 
 def screen_run() -> Box:
-    raw = log_sig()[-8:]
-    if not raw:
-        activity = [Text("Waiting for activity...", fg=SECONDARY)]
-    else:
-        # Level-coloured one-liners: glyph + message, same vocabulary as the
-        # shared log glyphs. Kept to a single Text per line so the panel
-        # height stays stable.
-        colors = {"err": DANGER, "warn": WARNING, "phase": accent()}
-        activity = [
-            Text(f"{LOG_GLYPH.get(level, '•')} {text}", fg=colors.get(level, SECONDARY))
-            for level, text in raw
-        ]
+    """Live run screen: context, the activity log, and the braille bar.
 
+    The log block is padded to a fixed number of rows so the screen never
+    grows or shrinks while events stream in.
+    """
     return page(
         panel(
             "Research running",
             Text(f"Query: {short_query(state['query'])}", bold=True),
+            Text(lambda: phase_sig(), fg=accent()),
             gap(),
-            Text(lambda: phase_sig(), fg=SECONDARY),
-            *activity[:2],
+            *log_block(activity_rows()),
             gap(),
-            Text(lambda: progress_bar(), fg=accent()),
-            Text(lambda: f"Step {prog_sig()[0]:.0f}/{prog_sig()[1]}  ·  {elapsed_sig()}", fg=SECONDARY),
+            Row(
+                Text(lambda: progress_parts()[0], fg=accent()),
+                Text(lambda: progress_parts()[1], fg=TERTIARY),
+                Text(lambda: progress_parts()[2], fg=SECONDARY),
+            ),
+            Text(lambda: clock_line(), fg=SECONDARY),
+            Text(lambda: timing_line(), fg=TERTIARY),
         ),
         gap(),
-        hint("Ctrl+C quits (partial work is lost)"),
+        footer=hint("Ctrl+C quits — whatever is finished is saved"),
     )
+
+
+def screen_logs() -> Box:
+    """Scrollable history of the last run's activity log."""
+
+    def activate(_item) -> None:
+        return None
+
+    entries = log_sig()
+    items = []
+    for index, (elapsed, level, text) in enumerate(entries):
+        if level == "phase":
+            label = f"▎{text}"
+        else:
+            label = f"{theme.format_duration(elapsed):>7}  {LOG_GLYPH.get(level, '·')} {text}"
+        items.append({"label": label, "value": index, "fg": log_color(level)})
+    register_list("logs", items, activate, visible=max(4, term_height() - 13 - MARGIN_TOP))
+
+    return page(
+        panel(
+            "Activity log",
+            Text(f"Query: {short_query(state['query'])}"),
+            Text(f"{len(entries)} lines · from the most recent run", fg=TERTIARY),
+            gap(),
+            *list_rows("logs"),
+        ),
+        gap(),
+        footer=hint("↑↓ move · PgUp/PgDn page · Home/End jump · Esc menu"),
+    )
+
+
+def save_lines(result: dict) -> list:
+    """Blank line plus where the report went — or why it did not."""
+    saved = result.get("saved")
+    if saved:
+        label = "Saved to" if result.get("ok") else "Partial report saved to"
+        return [gap(), Text(f"{label}: {fit(saved, inner_width() - len(label) - 3)}", fg=SECONDARY)]
+    error = result.get("save_error")
+    if error:
+        return [gap(), Text(f"Not saved: {error}", fg=WARNING)]
+    return []
 
 
 def screen_done() -> Box:
     result = state["result"] or {"ok": False, "error": "No result recorded."}
     if result.get("ok"):
-        saved = result.get("saved") or "not saved"
         rows = kv_rows([
             ("Duration", theme.format_duration(result.get("duration", 0))),
             ("Iterations", str(result.get("iterations", 0))),
@@ -987,17 +1083,20 @@ def screen_done() -> Box:
             ("Findings", str(result.get("findings", 0))),
             ("Gaps", str(result.get("gaps", 0))),
             ("Report", f"{result.get('report_len', 0):,} chars"),
-            ("Saved to", saved),
         ])
         return page(
-            panel("Research complete", *rows),
+            panel("Research complete", *rows, *save_lines(result)),
             gap(),
-            hint("Enter for the menu"),
+            footer=hint("Enter menu · l activity log"),
         )
     return page(
-        panel("Research failed", Text(str(result.get("error", "Unknown error")), fg=DANGER)),
+        panel(
+            "Research failed",
+            Text(str(result.get("error", "Unknown error")), fg=DANGER),
+            *save_lines(result),
+        ),
         gap(),
-        hint("Enter for the menu"),
+        footer=hint("Enter menu · l activity log"),
     )
 
 
@@ -1028,7 +1127,7 @@ def screen_settings() -> Box:
     return page(
         panel("Settings", *list_rows("settings")),
         gap(),
-        list_hint("edit", "menu"),
+        footer=list_hint("edit", "menu"),
     )
 
 
@@ -1053,7 +1152,7 @@ def screen_set_theme() -> Box:
     return page(
         panel("Color theme", *list_rows("set-theme")),
         gap(),
-        list_hint("apply", "back"),
+        footer=list_hint("apply", "back"),
     )
 
 
@@ -1079,7 +1178,7 @@ def screen_set_provider() -> Box:
     return page(
         panel("AI provider", *list_rows("set-provider")),
         gap(),
-        list_hint("edit", "back"),
+        footer=list_hint("edit", "back"),
     )
 
 
@@ -1179,7 +1278,7 @@ def screen_set_search() -> Box:
     return page(
         panel("Search", *list_rows("set-search")),
         gap(),
-        list_hint("edit", "back"),
+        footer=list_hint("edit", "back"),
     )
 
 
@@ -1232,7 +1331,7 @@ def screen_set_sources() -> Box:
             *list_rows("set-sources"),
         ),
         gap(),
-        list_hint("toggle", "back"),
+        footer=list_hint("toggle", "back"),
     )
 
 
@@ -1262,7 +1361,7 @@ def screen_set_defaults() -> Box:
     return page(
         panel("Research defaults", *list_rows("set-defaults")),
         gap(),
-        list_hint("edit", "back"),
+        footer=list_hint("edit", "back"),
     )
 
 
@@ -1350,8 +1449,8 @@ def screen_setup_welcome() -> Box:
     ], on_pick, visible=2)
 
     return page(
-        Box(*logo_lines(tick_sig())),
-        gap(),
+        Box(*logo_lines()),
+        gap(1),
         panel(
             "Welcome to Veritas",
             Text("Three things to get going: an API key for the AI brain, a Tavily key for web search, and a folder for reports."),
@@ -1360,7 +1459,7 @@ def screen_setup_welcome() -> Box:
             *list_rows("setup-welcome"),
         ),
         gap(),
-        hint("↑↓ move · Enter choose · Esc menu"),
+        footer=hint("↑↓ move · Enter choose · Esc menu"),
     )
 
 
@@ -1508,7 +1607,7 @@ def screen_setup_theme() -> Box:
     return page(
         panel("Setup (6/6)", Text("Pick a color theme", bold=True), gap(), *list_rows("setup-theme")),
         gap(),
-        hint("↑↓ move · Enter finish · Esc back"),
+        footer=hint("↑↓ move · Enter finish · Esc back"),
     )
 
 
@@ -1528,7 +1627,7 @@ def screen_setup_done() -> Box:
             ]),
         ),
         gap(),
-        hint("Enter for the menu"),
+        footer=hint("Enter for the menu"),
     )
 
 
@@ -1539,6 +1638,7 @@ SCREEN_BUILDERS = {
     "sources": screen_sources,
     "run": screen_run,
     "done": screen_done,
+    "logs": screen_logs,
     "settings": screen_settings,
     "set-theme": screen_set_theme,
     "set-reports": screen_set_reports,
@@ -1567,18 +1667,100 @@ SCREEN_BUILDERS = {
 # Progress bar + live activity
 # --------------------------------------------------------------------------
 
-def progress_bar() -> str:
-    """Progress bar with pulsing activity indicator; shown at bottom of run screen."""
+def bar_width() -> int:
+    """Bar width: the panel interior minus the percent suffix (" 100%")."""
+    return max(12, inner_width() - 5)
+
+
+def particles_for(width: int) -> int:
+    """Scale the particle count with the bar so wide bars never look empty."""
+    return max(3, min(14, width // 11))
+
+
+def activity_rows() -> int:
+    """How many activity lines the run screen shows at this terminal height.
+
+    Everything else on the screen is fixed height (two panel paddings, the
+    title, query and phase lines, the bar and its two stat lines, the gaps,
+    and the hint), so the log takes what is left.
+    """
+    return max(4, term_height() - 14 - MARGIN_TOP)
+
+
+def progress_parts() -> tuple:
+    """The bar as (filled, track, percent) so each part can be colored."""
     completed, total, _ = prog_sig()
     ratio = min(1.0, completed / total) if total else 0.0
-    width = 36
-    filled = int(width * ratio)
-    if 0 < filled < width:
-        pulse = "▏" if spin_sig() % 2 == 0 else "▎"
-        bar = "█" * (filled - 1) + pulse
-    else:
-        bar = "█" * filled + "░" * (width - filled)
-    return bar + f" {ratio * 100:.0f}%"
+    width = bar_width()
+    filled, track = theme.braille_bar(
+        ratio, width, anim_sig() * ANIM_TRAVEL, particles_for(width)
+    )
+    return filled, track, f" {ratio * 100:.0f}%"
+
+
+def clock_line() -> str:
+    """Elapsed time plus a rough estimate of what is left."""
+    line = f"Elapsed {elapsed_sig()}"
+    completed, total, _ = prog_sig()
+    elapsed = time.time() - state.get("run_start", 0.0)
+    if 0 < completed < total and 0 < elapsed < 86400:
+        remaining = (elapsed / completed) * (total - completed)
+        line += f"  ·  eta {theme.format_eta(remaining)}"
+    return line
+
+
+def timing_line() -> str:
+    """Where the run has spent its time: model inference vs web search."""
+    snapshot = stats_sig()
+    calls = sum(count for _, _, count in snapshot)
+    if not calls:
+        return "Timing appears after the first model call..."
+    parts = [
+        f"{timings.LABELS.get(kind, kind.title())} {theme.format_duration(seconds)} ({count})"
+        for kind, seconds, count in snapshot
+    ]
+    parts.append(f"{calls} calls")
+    return "  ·  ".join(parts)
+
+
+def activity_line(elapsed: float, level: str, text: str) -> Text:
+    """One log line: time gutter, level glyph, and a single-line message.
+
+    Messages are trimmed to the panel so the log block keeps its height: a
+    wrapped line would push the progress bar down mid-run. Phase entries are
+    headings — no gutter, accented bar, bold — so a run reads as sections.
+    """
+    if level == "phase":
+        return Text(f"{'':>7}  ▎{fit(text, max(8, inner_width() - 11))}", fg=accent(), bold=True)
+    room = max(8, inner_width() - 11)   # gutter + glyph + spaces
+    return Text(
+        f"{theme.format_duration(elapsed):>7}  {LOG_GLYPH.get(level, '·')} {fit(text, room)}",
+        fg=log_color(level),
+    )
+
+
+def log_block(rows: int) -> list:
+    """The tail of the activity log as exactly *rows* lines, headings spaced.
+
+    Newest lines sit at the bottom (just above the progress bar) and a blank
+    line is inserted before every heading, so phases group their own steps.
+    """
+    out: list = []
+    for elapsed, level, text in reversed(log_sig()):
+        if level == "phase":
+            if out:
+                out.append(Text(" "))
+            out.append(activity_line(elapsed, level, text))
+        else:
+            out.append(activity_line(elapsed, level, text))
+        if len(out) >= rows:
+            break
+    out = out[:rows]
+    out.reverse()
+    if not out:
+        out = [Text("Waiting for activity...", fg=SECONDARY)]
+    # Distinct instances (not a repeated one), each exactly one line tall.
+    return [Text(" ") for _ in range(rows - len(out))] + out
 
 
 # --------------------------------------------------------------------------
@@ -1613,6 +1795,10 @@ def _handle_input_key(e, target) -> None:
         target._cursor_position = len(target._value)
     except Exception:
         pass
+    # Full rebuild (not just the input node's native repaint: that path
+    # accumulates a horizontal panel offset per keystroke in this OpenTUI
+    # build — see _after_text_change).
+    _after_text_change()
 
 
 def _handle_search_key(e, name: str) -> None:
@@ -1658,6 +1844,8 @@ def _handle_search_key(e, name: str) -> None:
     if _text_key(char, modifiers):
         state["search"][name] = query + char
         set_cursor(name, 0)
+    # Same full-rebuild reason as _handle_input_key (see above).
+    input_sig.set(input_sig.peek() + 1)
 
 
 def _handle_list_key(e, name: str) -> None:
@@ -1688,7 +1876,7 @@ def _handle_list_key(e, name: str) -> None:
 def App():
     current = screen()
     list_sig()   # subscribe so list navigation repaints
-    tick_sig()   # subscribe so the banner shimmer repaints
+    input_sig()  # subscribe so typing repaints from a clean layout
 
     def on_key(e) -> None:
         key = getattr(e, "key", "") or ""
@@ -1729,6 +1917,9 @@ def App():
         if key == "q" and s == "menu":
             request_quit()
             return
+        if key == "l" and s == "done" and log_sig():
+            go("logs")
+            return
         if key in ("return", "enter") and s in ("done", "setup-done"):
             go("menu")
             return
@@ -1763,111 +1954,105 @@ def App():
 # Terminal lifecycle
 # --------------------------------------------------------------------------
 
-def _reset_terminal() -> None:
-    """Belt-and-braces terminal reset after the renderer tears down.
+# Every reporting mode the app (or OpenTUI) turns on. Left behind, they make
+# the shell inherit a terminal that reports mouse moves, pastes, and focus
+# changes; left on the alternate screen, they hide the shell's output.
+_RESET_SEQUENCES = (
+    "\x1b[?2026l"    # synchronized output (otherwise the shell's output stays held)
+    "\x1b[?1000l"    # basic mouse tracking
+    "\x1b[?1002l"    # button-event tracking
+    "\x1b[?1003l"    # any-event tracking
+    "\x1b[?1005l"    # utf8 mouse
+    "\x1b[?1006l"    # SGR mouse
+    "\x1b[?1015l"    # urxvt mouse
+    "\x1b[?1016l"    # pixel mouse
+    "\x1b[?2004l"    # bracketed paste
+    "\x1b[?1004l"    # focus reporting
+    "\x1b[?2027l"    # grapheme clustering
+    "\x1b[?2031l"    # color-scheme reporting
+    "\x1b[>4;0m"     # modifyOtherKeys off
+    "\x1b[?1l\x1b>"  # normal cursor keys, numeric keypad
+    "\x1b[<u"        # pop the kitty keyboard protocol
+    "\x1b[0m"        # default attributes
+    "\x1b[?25h"      # show cursor
+    "\x1b[?1049l"    # leave the alternate screen
+)
 
-    OpenTUI's teardown has a known race (echo restored before reporting
-    modes are off) that leaks stray sequences like `997;1n` into the
-    shell. We never use the mouse, so force it off at startup and
-    explicitly disable every reporting mode plus drain leftovers here.
+
+def _drain_stdin(budget: float = 0.6, idle: float = 0.15) -> None:
+    """Read and discard terminal replies until the line goes quiet.
+
+    Whatever we leave here is read by the shell instead, which then prints it
+    as literal escape text at the next prompt.
     """
-    try:
-        sys.stdout.write(
-            "\x1b[?1000l"    # basic mouse tracking
-            "\x1b[?1002l"    # button-event tracking
-            "\x1b[?1003l"    # any-event tracking
-            "\x1b[?1005l"    # utf8 mouse
-            "\x1b[?1006l"    # SGR mouse
-            "\x1b[?1015l"    # urxvt mouse
-            "\x1b[?2004l"    # bracketed paste
-            "\x1b[?1004l"    # focus reporting
-            "\x1b[?25h"      # show cursor
-            "\x1b[?1049l"    # leave alternate screen
-        )
-        sys.stdout.flush()
-    except Exception:
-        pass
     try:
         import select as _select
 
         fd = sys.stdin.fileno()
-        for _ in range(5):
+    except Exception:
+        return
+    deadline = time.monotonic() + budget
+    quiet_since = time.monotonic()
+    while True:
+        now = time.monotonic()
+        if now >= deadline:
+            return
+        try:
+            ready, _, _ = _select.select([fd], [], [], 0.05)
+        except Exception:
+            return
+        if ready:
             try:
-                ready, _, _ = _select.select([fd], [], [], 0.05)
-            except Exception:
-                break
-            if not ready:
-                break
-            try:
-                os.read(fd, 4096)
+                if not os.read(fd, 4096):
+                    return
             except OSError:
-                break
+                return
+            quiet_since = time.monotonic()
+        elif time.monotonic() - quiet_since >= idle:
+            return
+
+
+def _reset_terminal() -> None:
+    """Hand the terminal back to the shell exactly as we found it.
+
+    OpenTUI restores echo at startup, so replies to its own capability
+    queries ("997;1n" and friends) are echoed on screen the moment they
+    arrive — which is after the UI stopped drawing and before the shell
+    starts reading. Quitting therefore leaves rows of escape text behind.
+
+    So: turn echo off for the handover, disable everything we may have left
+    on, then drain the line until it stays quiet, and only then give the
+    tty back to the shell.
+    """
+    fd = -1
+    saved_attrs = None
+    try:
+        import termios
+
+        fd = sys.stdin.fileno()
+        saved_attrs = termios.tcgetattr(fd)
+        quiet = list(saved_attrs)
+        quiet[3] &= ~(termios.ECHO | termios.ECHONL | termios.ICANON)
+        termios.tcsetattr(fd, termios.TCSANOW, quiet)
+    except Exception:
+        saved_attrs = None
+    try:
+        sys.stdout.write(_RESET_SEQUENCES)
+        sys.stdout.flush()
     except Exception:
         pass
+    _drain_stdin()
+    if saved_attrs is not None:
+        try:
+            import termios
 
-
-def apply_terminal_theme() -> bool:
-    """Adapt structural tokens to the terminal's live bg/fg (opencode-style).
-
-    Queries OSC 10 (fg) / OSC 11 (bg) BEFORE the renderer takes over stdin,
-    then derives system colors via :mod:`ui.termcap`. Semantic roles stay
-    intact: module constants (ACCENTS, PANEL_BG, SECONDARY, TERTIARY,
-    SUBTITLE, DANGER, WARNING, INFO, TITLE_FG) remain the single tokens
-    everything consumes.
-
-    - Truecolor path with a successful query: panel bg = mix(bg, fg, ~10%),
-      body (SECONDARY) = terminal fg exactly, muted (TERTIARY/SUBTITLE) =
-      mix(bg, fg, ~50%, documented as ~45%). Accents (ACCENTS, DANGER,
-      WARNING, INFO, TITLE_FG) are unchanged so the chosen theme stays.
-    - Limited-terminal (non-truecolor) path with a successful query:
-      structural colors collapse to terminal default (None = transparent,
-      zero escapes, always correct on any bg) with bold retained for
-      titles/selection; accent roles keep existing termcap.to_256() values.
-    - ANY failure (not a TTY, timeout, parse error, exception) returns
-      False with module constants byte-identical (current behavior).
-
-    Respects VERITAS_TRUECOLOR override via the import-time TRUECOLOR flag.
-    Safe to call headless: instant no-op when stdin/stdout are not TTYs.
-    """
-    global PANEL_BG, SECONDARY, TERTIARY, SUBTITLE, TITLE_FG
-    try:
-        if not sys.stdin.isatty() or not sys.stdout.isatty():
-            return False
-        bg, fg = termcap.query_terminal_bg_fg()
-        if not bg or not fg:
-            return False
-        if TRUECOLOR:
-            try:
-                derived = termcap.derive_system_theme(bg, fg)
-            except Exception:
-                return False
-            PANEL_BG = derived["panel_bg"]
-            SECONDARY = derived["body"]
-            TERTIARY = derived["muted"]
-            SUBTITLE = derived["muted"]
-            # TITLE_FG + ACCENTS + DANGER/WARNING/INFO unchanged (accent path).
-        else:
-            # Monochrome collapse: zero escapes for structure, accents stay
-            # snapped via the existing to_256() values from import time.
-            PANEL_BG = None  # type: ignore[assignment]
-            SECONDARY = None  # type: ignore[assignment]
-            TERTIARY = None  # type: ignore[assignment]
-            SUBTITLE = None  # type: ignore[assignment]
-            TITLE_FG = None  # type: ignore[assignment]
-        return True
-    except Exception:
-        return False
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved_attrs)
+        except Exception:
+            pass
 
 
 def run() -> None:
     """Launch the OpenTUI app (blocking until quit)."""
-    # Adapt to the terminal's real palette before the renderer owns stdin.
-    # Silent fallback to defaults on any failure; never changes import-time
-    # behavior (apply step runs only here).
-    try:
-        apply_terminal_theme()
-    except Exception:
-        pass
     # Fresh installs land in the setup wizard; everyone else gets the menu.
     try:
         current_settings = load_settings()
