@@ -7,6 +7,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import logging
 from typing import List, Dict
 
 from models.research_state import (
@@ -17,6 +18,9 @@ from models.research_state import (
     ResearchState
 )
 from utils.llm_client import LLMClient
+from utils.text import clip
+
+log = logging.getLogger("veritas.synthesis")
 
 
 class SynthesisAgent:
@@ -95,18 +99,9 @@ class SynthesisAgent:
             question.answer = analysis['answer']
             question.sources = [r.url for r in search_results[:10]]
             
-            # Show key insight
+            # Show the answer, clipped: the panel keeps one line per entry.
             if ui_manager:
-                answer_preview = analysis['answer'][:150] + "..." if len(analysis['answer']) > 150 else analysis['answer']
-                confidence = analysis.get('confidence', 0.5)
-                ui_manager.add_message(
-                    f"Key Insight: {answer_preview}",
-                    style="white"
-                )
-                ui_manager.add_message(
-                    f"Confidence: {confidence:.0%}",
-                    style="white"
-                )
+                ui_manager.add_message(f"Insight: {clip(analysis['answer'])}", style="white")
         
         # Store identified gaps
         for gap_desc in analysis.get('gaps', []):
@@ -202,7 +197,8 @@ Return JSON:
             return cross_ref
         
         except Exception as e:
+            log.warning("cross-reference failed: %s", e, exc_info=True)
             if ui_manager:
-                ui_manager.add_message(f"Cross-reference error: {str(e)}", style="red bold")
+                ui_manager.add_message(f"Cross-reference error: {clip(str(e))}", style="yellow")
 
             return {"consensus": [], "contradictions": []}

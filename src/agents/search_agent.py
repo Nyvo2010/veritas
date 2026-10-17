@@ -8,6 +8,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import asyncio
+import logging
 from typing import List, Optional
 
 from models.research_state import (
@@ -17,7 +18,10 @@ from models.research_state import (
 )
 from utils.tavily_client import TavilySearchClient
 from utils.llm_client import LLMClient
+from utils.text import clip
 from config import MAX_SEARCH_RESULTS
+
+log = logging.getLogger("veritas.search")
 
 
 class SearchAgent:
@@ -83,16 +87,6 @@ class SearchAgent:
             results = []
             raw_results = response.get("results", [])
             
-            if ui_manager:
-                ui_manager.add_message(
-                    f'Searching: "{search_query}"',
-                    style="white"
-                )
-                ui_manager.add_message(
-                    f"Results: {len(raw_results)} found",
-                    style="white"
-                )
-            
             for result_data in raw_results:
                 result = SearchResult(
                     url=result_data.get("url"),
@@ -111,10 +105,10 @@ class SearchAgent:
         
         except Exception as e:
             error_msg = f"Search failed for '{search_query[:50]}...': {str(e)}"
+            log.warning("search failed for %r: %s", search_query, e, exc_info=True)
             if ui_manager:
-                ui_manager.add_message(f"Search error: {str(e)}", style="red bold")
                 ui_manager.add_message(
-                    "This could be due to API timeout, rate limiting, or network issues",
+                    f"Search error: {clip(str(e))} (timeout, rate limit, or network)",
                     style="yellow",
                 )
             state.reasoning_steps.append(f"[SEARCH ERROR] {error_msg}")

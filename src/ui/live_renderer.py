@@ -27,6 +27,8 @@ from rich.panel import Panel
 from rich.text import Text
 
 from ui import theme
+from ui.timings import Timings
+from utils.text import strip_markup
 
 
 @dataclass
@@ -36,15 +38,22 @@ class LogEntry:
     timestamp: float
 
 
-_LEVEL_STYLE = {
-    "phase": f"bold {theme.PRIMARY}",
-    "search": theme.PRIMARY,
-    "insight": theme.SECONDARY,
-    "ok": theme.SUCCESS,
-    "warn": theme.WARNING,
-    "err": f"bold {theme.ERROR}",
-    "info": theme.SECONDARY,
-}
+def _level_style(level: str) -> str:
+    """Rich style for a log level.
+
+    Resolved per call, not at import: the theme is applied after this module
+    is imported (cli.apply_saved_theme), so a cached dict would keep the
+    default accent no matter what the user picked.
+    """
+    return {
+        "phase": f"bold {theme.PRIMARY}",
+        "search": theme.PRIMARY,
+        "insight": theme.SECONDARY,
+        "ok": theme.SUCCESS,
+        "warn": theme.WARNING,
+        "err": f"bold {theme.ERROR}",
+        "info": theme.SECONDARY,
+    }.get(level, theme.SECONDARY)
 
 _LEVEL_GLYPH = {
     "phase": theme.GLYPH_PHASE,
@@ -76,6 +85,7 @@ class LiveRenderer:
         self.failed = False
         self.log_height = log_height
         self._log: Deque[LogEntry] = deque(maxlen=300)
+        self.timings = Timings()
 
         self._layout = Layout()
         self._layout.split_column(
@@ -83,6 +93,7 @@ class LiveRenderer:
             Layout(name="log", ratio=1),
             Layout(name="progress", size=7),
         )
+        self._live: Optional[Live] = None
 
     # -- lifecycle -----------------------------------------------------
 
@@ -218,12 +229,12 @@ class LiveRenderer:
             text.append("Waiting for activity...", style=theme.MUTED)
         for entry in entries:
             glyph = _LEVEL_GLYPH.get(entry.level, "·")
-            style = _LEVEL_STYLE.get(entry.level, theme.SECONDARY)
+            style = _level_style(entry.level)
             elapsed = theme.format_duration(entry.timestamp - self.start_time)
             text.append(f"{elapsed:>7} ", style=theme.MUTED)
             text.append(f"{glyph} ", style=style)
             # Keep markup from old call sites inert: render as plain text.
-            text.append(self._strip_markup(entry.text), style=theme.SECONDARY)
+            text.append(strip_markup(entry.text), style=theme.SECONDARY)
             text.append("\n")
         # Drop the final newline so the panel height stays constant.
         plain = text.plain
@@ -246,10 +257,14 @@ class LiveRenderer:
             eta_str = theme.format_eta(eta)
         else:
             eta_str = "Complete" if self.done else "—"
-        bar = theme.progress_bar(ratio)
+        # Same braille bar as the OpenTUI frontend: the particle clock is
+        # seconds since the run started, so no animation state is kept here.
+        particles = 0 if self.done else max(3, self.console.width // 12)
+        filled, track = theme.braille_bar(ratio, 40, elapsed * 11.0, particles)
         text = Text()
-        text.append(f"{bar} ", style=theme.PRIMARY)
-        text.append(f"{ratio * 100:.1f}%", style=theme.SECONDARY)
+        text.append(filled, style=theme.PRIMARY)
+        text.append(track, style=theme.MUTED)
+        text.append(f" {ratio * 100:.1f}%", style=theme.SECONDARY)
         text.append("\n")
         text.append("Step ", style=f"bold {theme.PRIMARY}")
         text.append(f"{self.completed_steps:.0f}/{self.total_steps}", style=theme.SECONDARY)
@@ -257,6 +272,10 @@ class LiveRenderer:
         text.append(theme.format_duration(elapsed), style=theme.SECONDARY)
         text.append("  |  ETA ", style=theme.MUTED)
         text.append(eta_str, style=theme.SECONDARY)
+        timing = self.timings.summary()
+        if timing:
+            text.append("\n")
+            text.append(timing, style=theme.MUTED)
         text.append("\n")
         text.append(self.status, style=theme.MUTED)
         return Panel(
@@ -268,11 +287,3 @@ class LiveRenderer:
             padding=theme.PANEL_PADDING,
         )
 
-    @staticmethod
-    def _strip_markup(text: str) -> str:
-        # Old call sites embed Rich markup like [bold blue]...[/bold blue].
-        # Render it as plain text so log lines stay on one line.
-        import re
-
-        cleaned = re.sub(r"\[(?:/[a-z ]+|[a-z][a-z ]*)\]", "", text, flags=re.IGNORECASE)
-        return " ".join(cleaned.split())

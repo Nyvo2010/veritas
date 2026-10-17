@@ -65,12 +65,6 @@ class QueryAnalyzerAgent:
         # Convert to SubQuestion objects
         sub_questions = []
         
-        # Suppress query analysis summary
-        
-        # Add header for subquestions
-        if ui_manager and decomposition.get("sub_questions"):
-            ui_manager.add_message("Generated Subquestions:", style="white")
-        
         for i, sq_data in enumerate(decomposition.get("sub_questions", [])):
             question_text = str(sq_data.get("question") or "").strip()
             if not question_text:
@@ -86,10 +80,6 @@ class QueryAnalyzerAgent:
             
             # Add to state
             state.add_question(sub_q)
-            
-            if ui_manager:
-                # Show generated subquestions
-                ui_manager.add_message(f"{i+1}. {question_text}", style="white")
 
         return sub_questions
     
@@ -132,14 +122,8 @@ class QueryAnalyzerAgent:
                 ui_manager.add_message("No follow-up questions needed", style="dim white")
             return []
         
-        # Suppress follow-up generation messages
-        
         new_questions = []
-        
-        # Add header for follow-up questions
-        if ui_manager and follow_ups:
-            ui_manager.add_message("Generated Follow-up Questions:", style="white")
-        
+
         # Create SubQuestions from follow-ups
         for i, fq in enumerate(follow_ups[:3]):  # Limit to 3 follow-ups
             sub_q = SubQuestion(
@@ -152,10 +136,6 @@ class QueryAnalyzerAgent:
             )
             new_questions.append(sub_q)
             state.add_question(sub_q)
-            
-            if ui_manager:
-                # Show generated follow-up subquestions
-                ui_manager.add_message(f"{i+1}. {fq}", style="white")
 
         return new_questions
     
@@ -210,16 +190,6 @@ Return JSON:
                 gaps_data.get("moderate_gaps", [])
             )
             
-            if all_gaps and ui_manager:
-                ui_manager.add_message(
-                    f"Knowledge Gaps Identified: {len(all_gaps)} total",
-                    style="white"
-                )
-                for gap in all_gaps[:5]:
-                    ui_manager.add_message(f"- {gap}", style="white")
-                if len(all_gaps) > 5:
-                    ui_manager.add_message(f"... and {len(all_gaps) - 5} more", style="dim white")
-
             return all_gaps
 
         except Exception as e:

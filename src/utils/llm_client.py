@@ -20,7 +20,18 @@ import httpx
 import logging
 from openai import OpenAI, AsyncOpenAI
 
-log = logging.getLogger(__name__)
+from utils.text import clip
+
+log = logging.getLogger("veritas.llm")
+
+
+def _prompt_size(messages) -> tuple:
+    """(characters, message count) for a request, without dumping it all."""
+    total = 0
+    for message in messages or []:
+        total += len(str(message.get("content", "")))
+    return total, len(messages or [])
+
 
 try:
     from config import (
@@ -40,6 +51,13 @@ try:
     )
 except ImportError as e:
     raise ImportError("The 'config' module is missing or not found. Ensure it exists and is in the Python path.") from e
+
+# A single report section: how long one request may take, and how many times
+# it is worth retrying before the section is written off. Sections run in
+# parallel and the report is still assembled from the survivors, so one stall
+# must not be able to consume the whole run's time budget.
+SECTION_REQUEST_TIMEOUT = 180.0
+SECTION_MAX_ATTEMPTS = 3
 
 
 def _tolerant_loads(candidate: str) -> Dict:
@@ -120,6 +138,7 @@ def fetch_models(api_base_url: str, api_key: str, timeout: float = 15.0) -> List
         raise RuntimeError("The endpoint URL is empty.")
     url = f"{normalized}/models"
     headers = {"Authorization": f"Bearer {(api_key or '').strip()}"} if (api_key or "").strip() else {}
+    started = time.perf_counter()
     try:
         response = httpx.get(url, headers=headers, timeout=timeout)
     except (httpx.ConnectError, httpx.ConnectTimeout) as e:
@@ -140,6 +159,7 @@ def fetch_models(api_base_url: str, api_key: str, timeout: float = 15.0) -> List
     ids = sorted({str(item.get("id", "")) for item in data if isinstance(item, dict) and item.get("id")})
     if not ids:
         raise RuntimeError("The endpoint returned no models.")
+    log.debug("listed %s models from %s in %.2fs", len(ids), normalized, time.perf_counter() - started)
     return ids
 
 
@@ -231,7 +251,7 @@ class LLMClient:
             if not fallback or fallback == self.model:
                 raise
             log.warning(
-                "Model %r failed after %s attempts (%s); retrying with fallback %r",
+                "model %r failed after %s attempts (%s); switching to fallback %r",
                 self.model, self.max_retries, exc, fallback,
             )
             self.model = fallback
@@ -325,11 +345,15 @@ class LLMClient:
         current_time = time.time()
         time_since_last_call = current_time - self._last_api_call
         if time_since_last_call < self._rate_limit_delay:
-            time.sleep(self._rate_limit_delay - time_since_last_call)
+            waited = self._rate_limit_delay - time_since_last_call
+            log.debug("rate limiter: waiting %.2fs before the next call", waited)
+            time.sleep(waited)
 
+        chars, count = _prompt_size(messages)
         attempt = 0
 
         while attempt < self.max_retries:
+            started = time.perf_counter()
             try:
                 self._last_api_call = time.time()  # Update last call time
 
@@ -344,30 +368,51 @@ class LLMClient:
                 if json_mode:
                     params["response_format"] = {"type": "json_object"}
 
+                log.debug(
+                    "chat completion -> %s | %s msgs, %s chars, temp=%s, max_tokens=%s, "
+                    "json=%s, attempt=%s/%s | last user msg: %s",
+                    self.model, count, chars, temperature, max_tokens, json_mode,
+                    attempt + 1, self.max_retries, clip(messages[-1].get("content") if messages else "", 400),
+                )
+
                 if stream:
                     response = self.client.chat.completions.create(**params, stream=True)
+                    log.debug("stream started for %s", self.model)
                     return response
                 else:
                     response = self.client.chat.completions.create(**params)
                     self._last_finish_reason = response.choices[0].finish_reason
                     content = response.choices[0].message.content
+                    usage = getattr(response, "usage", None)
+                    log.info(
+                        "chat completion <- %s in %.2fs | %s chars, finish=%s, "
+                        "tokens in/out=%s/%s | %s",
+                        self.model, time.perf_counter() - started, len(content or ""),
+                        self._last_finish_reason,
+                        getattr(usage, "prompt_tokens", "?") if usage else "?",
+                        getattr(usage, "completion_tokens", "?") if usage else "?",
+                        clip(content, 200),
+                    )
                     return content or ""
 
             except httpx.ConnectError as e:
+                log.error("cannot reach %s: %s", self.api_base_url, e)
                 self._raise_connection_error(e)
             except Exception as e:
                 error_str = str(e).lower()
+                log.warning(
+                    "chat completion failed after %.2fs (attempt %s/%s): %s",
+                    time.perf_counter() - started, attempt + 1, self.max_retries, e,
+                )
 
                 # Handle rate limiting
                 if "rate" in error_str or "429" in error_str:
-                    log.debug(f"   Rate limit error: {e}")
                     if not self._handle_rate_limit_sync(attempt):
                         raise Exception(f"Max retries ({self.max_retries}) exceeded due to rate limiting")
                     attempt += 1
 
                 # Handle timeout errors
                 elif "timeout" in error_str or "timed out" in error_str:
-                    log.debug(f"   Timeout error: {e}")
                     if attempt >= self.max_retries - 1:
                         raise Exception(f"API timeout after {self.max_retries} attempts")
                     time.sleep(self.retry_delay)
@@ -375,24 +420,20 @@ class LLMClient:
 
                 # Handle bad request errors
                 elif "400" in error_str or "bad request" in error_str:
-                    log.debug(f"   Bad request error: {e}")
                     raise Exception(f"Bad request to the LLM API: {e}")
 
                 # Handle auth errors (don't retry)
                 elif "401" in error_str or "403" in error_str or "unauthorized" in error_str or "forbidden" in error_str:
-                    log.debug(f"   Auth error: {e}")
                     raise Exception(f"LLM API authentication failed (check the API key): {e}")
 
                 # Handle general API errors
                 elif "api" in error_str or "500" in error_str or "503" in error_str:
-                    log.debug(f"   API error: {e}")
                     if attempt >= self.max_retries - 1:
                         raise Exception(f"API error after {self.max_retries} attempts: {e}")
                     time.sleep(self.retry_delay)
                     attempt += 1
 
                 else:
-                    log.debug(f"   Unexpected error in LLM chat completion: {e}")
                     raise
 
         raise Exception(f"Failed to complete request after {self.max_retries} attempts")
@@ -434,6 +475,7 @@ class LLMClient:
         attempt_messages = list(messages)
         current_max_tokens = max_tokens
         last_error = None
+        chars, count = _prompt_size(messages)
 
         for parse_attempt in range(1, max_parse_retries + 1):
             content = self.chat_completion(
@@ -444,25 +486,26 @@ class LLMClient:
                 top_p=top_p,
             )
             try:
-                return _extract_json(content)
+                parsed = _extract_json(content)
+                log.debug("json parse ok (attempt %s/%s, %s msgs, %s chars in)",
+                          parse_attempt, max_parse_retries, count, chars)
+                return parsed
             except json.JSONDecodeError as e:
                 last_error = e
                 if parse_attempt >= max_parse_retries:
                     break
                 if self._last_finish_reason == "length":
                     current_max_tokens = min(int(current_max_tokens * 1.5) + 512, 16000)
-                    log.debug(
-                        f"   [!] JSON response truncated "
-                        f"(attempt {parse_attempt}/{max_parse_retries}); "
-                        f"retrying with max_tokens={current_max_tokens}..."
+                    log.warning(
+                        "json truncated (attempt %s/%s); retrying with max_tokens=%s",
+                        parse_attempt, max_parse_retries, current_max_tokens,
                     )
                     # Fresh retry with the original messages and a bigger budget
                     attempt_messages = list(messages)
                 else:
-                    log.debug(
-                        f"   [!] JSON parse failed "
-                        f"(attempt {parse_attempt}/{max_parse_retries}): {e}. "
-                        f"Asking model to repair..."
+                    log.warning(
+                        "json parse failed (attempt %s/%s): %s; asking model to repair: %s",
+                        parse_attempt, max_parse_retries, e, clip(content, 200),
                     )
                     attempt_messages = attempt_messages + [
                         {"role": "assistant", "content": content[:4000]},
@@ -474,8 +517,7 @@ class LLMClient:
         )
 
     def decompose_query(self, main_query: str) -> Dict:
-        """
-        Decompose a main query into sub-questions using ReAct-style reasoning
+        """Decompose a main query into prioritised sub-questions.
 
         Returns dict with: reasoning, sub_questions, priorities, search_strategies
         """
@@ -533,10 +575,10 @@ Return a JSON with this structure:
         search_results: List[Dict],
         previous_findings: List[str] = None
     ) -> Dict:
-        """
-        Analyze search results and determine next actions using ReAct reasoning
+        """Analyse search results and decide whether the question is answered.
 
-        Returns dict with: analysis, answer, confidence, gaps, follow_up_questions, needs_more_research
+        Returns dict with: analysis, answer, confidence, gaps, follow_up_questions,
+            needs_more_research
         """
         system_prompt = """You are an expert research analyst. Analyze search results and determine if the question is sufficiently answered.
 
@@ -595,8 +637,7 @@ Return JSON:
         return self.chat_json(messages, max_tokens=4096)
 
     def identify_report_themes(self, all_findings: List[Dict]) -> Dict:
-        """
-        Meta-analysis to identify major themes for parallel report generation
+        """Meta-analysis: cluster all findings into distinct report themes.
 
         Returns: themes with their related findings
         """
@@ -654,7 +695,7 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
         """Section generation with the primary model, falling back once on failure."""
         try:
             return await self._generate_section_async(
-                section_title, theme_description, relevant_findings, main_query, style
+                section_title, theme_description, relevant_findings, main_query, style, self.model
             )
         except Exception as exc:
             fallback = (self.fallback_model or "").strip()
@@ -667,7 +708,7 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
             self.model = fallback
             self.using_fallback = True
             return await self._generate_section_async(
-                section_title, theme_description, relevant_findings, main_query, style
+                section_title, theme_description, relevant_findings, main_query, style, fallback
             )
 
     async def _generate_section_async(
@@ -676,18 +717,20 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
         theme_description: str,
         relevant_findings: List[Dict],
         main_query: str,
-        style: str = "comprehensive"
+        style: str = "comprehensive",
+        current_model: str = None,
     ) -> str:
-        """
-        Generate a single report section asynchronously
+        """Generate a single report section asynchronously.
 
         Args:
-            section_title: Title of the section
-            theme_description: Description of what to cover
-            relevant_findings: Findings relevant to this section
-            main_query: Original research query
-            style: Writing style (comprehensive, concise, technical)
+            section_title: Section heading (added automatically).
+            theme_description: What this section should cover.
+            relevant_findings: Findings fed to this section.
+            main_query: The user's original question.
+            style: Writing style (comprehensive, concise, technical).
+            current_model: Model in play right now (may be the fallback).
         """
+
         system_prompt = f"""You are an expert analyst writing a SPECIFIC, FOCUSED section for a research report.
 
 CRITICAL: This section must ONLY address the main research query: "{main_query}"
@@ -713,6 +756,7 @@ Style: {style}
 
 DO NOT include the section title as a heading (it will be added automatically).
 Start directly with substantive content."""
+
 
         findings_text = "\n\n".join([
             f"[Source {i+1}] {f.get('content', '')[:600]}\n"
@@ -751,7 +795,11 @@ Focus on DEPTH over BREADTH. This section should reveal something specific and i
         if time_since_last_call < self._rate_limit_delay:
             await asyncio.sleep(self._rate_limit_delay - time_since_last_call)
 
+        chars, count = _prompt_size(messages)
         attempt = 0
+        started = time.perf_counter()
+        log.info("section %r -> %s | %s msgs, %s chars, max_tokens=%s",
+                 section_title, self.model, count, chars, REPORT_SECTION_MAX_TOKENS)
         while True:
             try:
                 self._last_api_call = time.time()  # Update last call time
@@ -767,21 +815,28 @@ Focus on DEPTH over BREADTH. This section should reveal something specific and i
                 # Add timeout to prevent hanging
                 response = await asyncio.wait_for(
                     self.async_client.chat.completions.create(**params),
-                    timeout=180.0  # 3 minute timeout per section
+                    timeout=SECTION_REQUEST_TIMEOUT
                 )
                 content = response.choices[0].message.content
+                log.info("section %r <- %s chars in %.1fs",
+                         section_title, len(content or ""), time.perf_counter() - started)
                 return content or ""
 
             except asyncio.TimeoutError:
-                log.debug(f"  [!] Report generation timeout for section (attempt {attempt + 1}/{self.max_retries})")
-                if attempt >= self.max_retries - 1:
-                    raise Exception(f"Report generation timed out after {self.max_retries} attempts")
+                log.warning("section %r timed out (attempt %s/%s, %.1fs elapsed)",
+                            section_title, attempt + 1, self.max_retries,
+                            time.perf_counter() - started)
+                if attempt >= SECTION_MAX_ATTEMPTS - 1:
+                    raise Exception(
+                        f"Report section timed out after {SECTION_MAX_ATTEMPTS} attempts"
+                    )
                 await asyncio.sleep(self.retry_delay)
                 attempt += 1
 
             except Exception as e:
                 error_str = str(e).lower()
-                log.debug(f"  [!] Report generation error: {e}")
+                log.warning("section %r failed (attempt %s): %s",
+                            section_title, attempt + 1, e)
 
                 # Handle rate limiting
                 if "rate" in error_str or "429" in error_str or "capacity" in error_str:
@@ -790,12 +845,10 @@ Focus on DEPTH over BREADTH. This section should reveal something specific and i
                     attempt += 1
                     continue
 
-                if attempt >= self.max_retries - 1:
+                if attempt >= SECTION_MAX_ATTEMPTS - 1:
                     raise Exception(f"Report generation failed: {str(e)}")
                 await asyncio.sleep(self.retry_delay)
                 attempt += 1
-
-        raise Exception(f"Failed to generate section after {self.max_retries} attempts")
 
     def generate_executive_summary(
         self,

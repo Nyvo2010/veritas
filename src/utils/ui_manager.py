@@ -11,25 +11,7 @@ from typing import Optional
 from rich.console import Console
 
 from ui.live_renderer import LiveRenderer
-
-
-def _classify_legacy_message(message: str) -> str:
-    lowered = message.lower()
-    if "phase" in lowered and ("1" in lowered or "2" in lowered or "3" in lowered or "4" in lowered):
-        return "phase"
-    if "searching" in lowered:
-        return "search"
-    if "key insight" in lowered:
-        return "insight"
-    if "completed:" in lowered or "saved" in lowered or "found" in lowered:
-        return "ok"
-    if "error" in lowered or "failed" in lowered:
-        return "err"
-    if "warn" in lowered or "gap" in lowered:
-        return "warn"
-    if "generat" in lowered or "writ" in lowered or "analyz" in lowered:
-        return "info"
-    return "info"
+from utils.text import classify_message
 
 
 class UIManager:
@@ -49,6 +31,14 @@ class UIManager:
 
     def set_status(self, status: str) -> None:
         self._renderer.set_status(status)
+
+    def add_timing(self, kind: str, seconds: float) -> None:
+        """Record how long one blocking call took ("llm" or "search")."""
+        self._renderer.timings.add(kind, seconds)
+
+    def log(self, level: str, text: str) -> None:
+        """Write one leveled line (same vocabulary as the OpenTUI sink)."""
+        self._renderer.log(level, text)
 
     # -- legacy API (kept for agents/main.py) --------------------------
     def initialize(self, total_steps: int, description: str = "Research Progress") -> None:
@@ -90,7 +80,7 @@ class UIManager:
         lowered = text.lower()
         if lowered in {"done", "done!"}:
             return
-        level = _classify_legacy_message(text)
+        level = classify_message(text)
         if style in ("red bold", "red", "bold red"):
             level = "err"
         elif style in ("yellow", "dim yellow"):

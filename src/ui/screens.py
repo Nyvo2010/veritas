@@ -38,6 +38,9 @@ def block_renderable(title: Optional[str], body, title_style: Optional[str] = No
 
 
 def print_header(console: Console, subtitle: Optional[str] = None) -> None:
+    # One blank line between the terminal's top edge and the first block,
+    # matching the OpenTUI frontend's MARGIN_TOP.
+    console.print()
     title = theme.LOGO_SUBTITLE if subtitle is None else f"{theme.LOGO_SUBTITLE} — {subtitle}"
     try:
         width = console.width
@@ -49,9 +52,10 @@ def print_header(console: Console, subtitle: Optional[str] = None) -> None:
         # instead — same threshold as the OpenTUI banner fallback.
         console.print(block_renderable(title, Text("VERITAS", style=f"bold {theme.PRIMARY}")))
     else:
-        # no_wrap keeps wide ASCII art intact instead of reflowing it.
-        logo = Text("\n".join(theme.COMPACT_LOGO), style=f"bold {theme.PRIMARY}", no_wrap=True)
+        # no_wrap keeps wide ASCII art intact instead of reflowing it.        logo = Text("\n".join(theme.COMPACT_LOGO), style=f"bold {theme.PRIMARY}", no_wrap=True)
         console.print(block_renderable(title, logo))
+        console.print()
+        console.print()
     console.print()
 
 

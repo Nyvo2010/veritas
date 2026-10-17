@@ -8,11 +8,23 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import asyncio
+import logging
+import time
 from typing import List, Dict
 
 from models.research_state import ResearchState, ReportSection
 from utils.llm_client import LLMClient
+from utils.text import clip
 from config import MAX_PARALLEL_SECTIONS
+
+log = logging.getLogger("veritas.report")
+
+# One section may not hold the whole report hostage: a section that stalls is
+# dropped and the report is still assembled from the rest.
+SECTION_TIMEOUT = 420.0
+
+
+SECTION_TIMEOUT_PLACEHOLDER = "[Section generation timed out after {seconds:.0f}s]"
 
 
 class ReportGeneratorAgent:
@@ -47,20 +59,38 @@ class ReportGeneratorAgent:
         if ui_manager is not None and callable(getattr(ui_manager, "advance", None)):
             advance = ui_manager.advance
 
+        def note(level: str, message: str) -> None:
+            """One leveled line to the UI, plus the same line to the file log."""
+            log.debug("report[%s] %s", level, message)
+            log_method = getattr(ui_manager, "log", None)
+            if callable(log_method):
+                log_method(level, message)
+            elif ui_manager is not None:
+                ui_manager.add_message(message, style="white")
+
+        started = time.perf_counter()
+
         # Step 1: Identify major themes through meta-analysis
         if ui_manager:
             ui_manager.set_status("Identifying report themes...")
         themes = await self._identify_themes(state, ui_manager)
+        note("ok", f"Report themes identified in {time.perf_counter() - started:.0f}s")
         if advance:
             advance(1, "Report themes identified")
 
         # Step 2: Generate sections in parallel
-        sections = await self._generate_sections_parallel(state, themes, style, ui_manager, base_step + 2)
+        sections, failed = await self._generate_sections_parallel(
+            state, themes, style, ui_manager, base_step + 2
+        )
+        if failed:
+            note("warn", f"{failed} of {len(sections) + failed} sections did not complete")
 
         # Step 3: Generate executive summary
         if ui_manager:
             ui_manager.set_status("Writing executive summary...")
+        summary_started = time.perf_counter()
         executive_summary = await self._generate_executive_summary(state, sections)
+        note("ok", f"Executive summary written ({time.perf_counter() - summary_started:.0f}s)")
         if advance:
             advance(1, "Executive summary complete")
 
@@ -82,6 +112,10 @@ class ReportGeneratorAgent:
             advance(1, "Report assembled")
 
         state.final_report = final_report
+        log.info(
+            "report assembled: %s sections, %s chars, %s failed, %.1fs total",
+            len(sections), len(final_report), failed, time.perf_counter() - started,
+        )
 
         return final_report
     
@@ -113,9 +147,13 @@ class ReportGeneratorAgent:
         style: str,
         ui_manager=None,
         base_step: int = 0
-    ) -> List[ReportSection]:
+    ) -> tuple:
         """
-        Generate report sections in parallel using asyncio
+        Generate report sections in parallel using asyncio.
+
+        Returns ``(sections, failed_count)``. Sections are bounded by their
+        own timeout rather than one shared deadline, so a single stall costs
+        one section instead of the entire report.
         """
         tasks = []
         theme_list = themes.get("themes") if isinstance(themes, dict) else None
@@ -167,75 +205,54 @@ class ReportGeneratorAgent:
         # Execute tasks with concurrency limit
         sections = []
         semaphore = asyncio.Semaphore(MAX_PARALLEL_SECTIONS)
-        
+
+        def note(level: str, message: str) -> None:
+            log_method = getattr(ui_manager, "log", None)
+            if callable(log_method):
+                log_method(level, message)
+            elif ui_manager is not None:
+                ui_manager.add_message(message, style="white")
+
         async def generate_with_progress(order, title, task):
             async with semaphore:
+                started = time.perf_counter()
+                note("info", f"Writing section: {clip(title)}")
                 try:
-                    if ui_manager:
-                        advance = getattr(ui_manager, "advance", None)
-                        if callable(advance):
-                            advance(0, f"Generating section: {title[:40]}...")
-                        else:
-                            ui_manager.update_progress(base_step, f"Generating section: {title[:40]}...")
-                        ui_manager.add_message(
-                            f"Writing report section: {title}",
-                            style="white"
-                        )
-
-                    content = await task
-
-                    if ui_manager:
-                        if callable(getattr(ui_manager, "advance", None)):
-                            ui_manager.advance(1, f"Completed section: {title[:40]}")
-                        ui_manager.add_message(
-                            f"Completed: {title[:40]}",
-                            style="white"
-                        )
-
-                    return order, title, content
+                    content = await asyncio.wait_for(task, timeout=SECTION_TIMEOUT)
+                except asyncio.TimeoutError:
+                    log.warning("section %r timed out after %.0fs", title, SECTION_TIMEOUT)
+                    note("warn", f"Section timed out after {SECTION_TIMEOUT:.0f}s: {clip(title)}")
+                    return order, title, SECTION_TIMEOUT_PLACEHOLDER.format(seconds=SECTION_TIMEOUT), True
                 except Exception as e:
-                    if ui_manager:
-                        ui_manager.add_message(
-                            f"Error: {title[:40]} - {str(e)[:100]}",
-                            style="white"
-                        )
-                    # Return a placeholder instead of failing completely
-                    return order, title, f"[Section generation failed: {str(e)}]"
-        
-        # Gather all results with timeout
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*[
-                    generate_with_progress(order, title, task)
-                    for order, title, task in tasks
-                ], return_exceptions=False),
-                timeout=600.0  # 10 minute timeout for all sections
-            )
-        except asyncio.TimeoutError:
-            error_msg = "Report section generation timed out after 10 minutes"
-            if ui_manager:
-                ui_manager.add_message(f"Error: {error_msg}", style="white")
-            raise Exception(error_msg)
-        except Exception as e:
-            error_msg = f"Report section generation failed: {str(e)}"
-            if ui_manager:
-                ui_manager.add_message(f"Error: {error_msg}", style="white")
-            raise
-        
-        # Convert to ReportSection objects
-        for order, title, content in sorted(results, key=lambda x: x[0]):
+                    log.error("section %r failed: %s", title, e, exc_info=True)
+                    note("err", f"Section failed: {clip(title)} ({clip(str(e), 60)})")
+                    return order, title, f"[Section generation failed: {e}]", True
+                duration = time.perf_counter() - started
+                log.info("section %r done in %.1fs (%s chars)", title, duration, len(content))
+                note("ok", f"Section ready in {duration:.0f}s: {clip(title)}")
+                advance = getattr(ui_manager, "advance", None)
+                if callable(advance):
+                    advance(1, f"Completed section: {clip(title, 40)}")
+                return order, title, content, False
+
+        results = await asyncio.gather(*[
+            generate_with_progress(order, title, task)
+            for _, title, task in tasks
+        ], return_exceptions=False)
+
+        failed = 0
+        for order, title, content, failed_section in sorted(results, key=lambda x: x[0]):
+            failed += 1 if failed_section else 0
             section = ReportSection(
                 title=title,
                 content=content,
                 sources=[],  # Sources are inline in content
-                order=order
+                order=order,
             )
             sections.append(section)
             state.report_sections.append(section)
-        
-        # Suppress section completion summary
-        
-        return sections
+
+        return sections, failed
     
     async def _generate_executive_summary(
         self,
