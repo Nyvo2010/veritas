@@ -1,6 +1,7 @@
 """
 Utility module for interacting with any OpenAI-compatible LLM endpoint.
-Defaults to NVIDIA NIM; override the base URL, key, and model per install.
+The base URL, key, and model are supplied per install (env, .env, or the
+settings file); nothing is bundled.
 """
 
 import sys
@@ -196,7 +197,11 @@ class LLMClient:
             base_url=self.api_base_url,
             timeout=timeout,
         )
-        self.model = (model or LLM_MODEL).strip() if (model or LLM_MODEL) else ""
+        self.model = ((model if model is not None else LLM_MODEL) or "").strip()
+        if not self.model:
+            raise ValueError(
+                "No LLM model id configured. Set one in Settings or the LLM_MODEL variable."
+            )
         default_fallback = fallback_model if fallback_model is not None else LLM_FALLBACK_MODEL
         self.fallback_model = (default_fallback or "").strip()
         if self.fallback_model == self.model:
@@ -219,7 +224,8 @@ class LLMClient:
         parsed = urlparse(normalized)
         if not parsed.scheme or not parsed.netloc:
             raise ValueError(
-                "LLM API base URL must include a scheme and hostname, e.g. https://integrate.api.nvidia.com/v1"
+                "LLM API base URL must include a scheme and hostname, "
+                "e.g. https://your-endpoint.example/v1"
             )
 
         rebuilt = f"{parsed.scheme}://{parsed.netloc}"
@@ -299,10 +305,8 @@ class LLMClient:
         messages: List[Dict[str, str]],
         temperature: float = TEMPERATURE_ANALYSIS,
         max_tokens: int = 4096,
-        stream: bool = False,
         json_mode: bool = False,
         top_p: float = TOP_P,
-        reasoning_effort: str = None,  # Kept for compatibility, ignored by most endpoints
     ) -> str:
         """Chat completion with the primary model, falling back once if it fails."""
         return self._with_fallback(
@@ -310,10 +314,8 @@ class LLMClient:
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            stream=stream,
             json_mode=json_mode,
             top_p=top_p,
-            reasoning_effort=reasoning_effort,
         )
 
     def _chat_completion(
@@ -321,10 +323,8 @@ class LLMClient:
         messages: List[Dict[str, str]],
         temperature: float = TEMPERATURE_ANALYSIS,
         max_tokens: int = 4096,
-        stream: bool = False,
         json_mode: bool = False,
         top_p: float = TOP_P,
-        reasoning_effort: str = None,  # Kept for compatibility, ignored by most endpoints
     ) -> str:
         """
         Send a chat completion request with retry logic
@@ -333,13 +333,11 @@ class LLMClient:
             messages: Chat messages as dicts with 'role' and 'content'
             temperature: Sampling temperature (0-2)
             max_tokens: Maximum tokens in response
-            stream: Whether to stream the response
             json_mode: Enable JSON mode for structured output
             top_p: Nucleus sampling parameter
-            reasoning_effort: Not used (kept for compatibility)
 
         Returns:
-            Response text (or stream if stream=True)
+            Response text
         """
         # Rate limiting: ensure at least 1 second between API calls
         current_time = time.time()
@@ -375,25 +373,20 @@ class LLMClient:
                     attempt + 1, self.max_retries, clip(messages[-1].get("content") if messages else "", 400),
                 )
 
-                if stream:
-                    response = self.client.chat.completions.create(**params, stream=True)
-                    log.debug("stream started for %s", self.model)
-                    return response
-                else:
-                    response = self.client.chat.completions.create(**params)
-                    self._last_finish_reason = response.choices[0].finish_reason
-                    content = response.choices[0].message.content
-                    usage = getattr(response, "usage", None)
-                    log.info(
-                        "chat completion <- %s in %.2fs | %s chars, finish=%s, "
-                        "tokens in/out=%s/%s | %s",
-                        self.model, time.perf_counter() - started, len(content or ""),
-                        self._last_finish_reason,
-                        getattr(usage, "prompt_tokens", "?") if usage else "?",
-                        getattr(usage, "completion_tokens", "?") if usage else "?",
-                        clip(content, 200),
-                    )
-                    return content or ""
+                response = self.client.chat.completions.create(**params)
+                self._last_finish_reason = response.choices[0].finish_reason
+                content = response.choices[0].message.content
+                usage = getattr(response, "usage", None)
+                log.info(
+                    "chat completion <- %s in %.2fs | %s chars, finish=%s, "
+                    "tokens in/out=%s/%s | %s",
+                    self.model, time.perf_counter() - started, len(content or ""),
+                    self._last_finish_reason,
+                    getattr(usage, "prompt_tokens", "?") if usage else "?",
+                    getattr(usage, "completion_tokens", "?") if usage else "?",
+                    clip(content, 200),
+                )
+                return content or ""
 
             except httpx.ConnectError as e:
                 log.error("cannot reach %s: %s", self.api_base_url, e)

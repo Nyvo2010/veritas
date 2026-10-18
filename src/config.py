@@ -11,19 +11,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # API Keys
-# Default provider is NVIDIA NIM (OpenAI-compatible endpoint), but any
-# OpenAI-compatible base URL works. LLM_* env vars win over NVIDIA_* ones.
-NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY", "")
-NVIDIA_API_BASE_URL = os.environ.get("NVIDIA_API_BASE_URL", "https://integrate.api.nvidia.com/v1")
-LLM_API_KEY = os.environ.get("LLM_API_KEY", NVIDIA_API_KEY)
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", NVIDIA_API_BASE_URL)
+# Veritas ships no bundled provider: the user supplies an OpenAI-compatible
+# base URL, its key, and a model id (env, .env, or the settings file).
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "")
+LLM_MODEL = os.environ.get("LLM_MODEL", "")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 
-# Model Configuration
-# Default model for all LLM inference (analysis, reasoning, reports).
-# Override per install via settings, the setup wizard, or LLM_MODEL.
-NVIDIA_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
-LLM_MODEL = os.environ.get("LLM_MODEL", NVIDIA_MODEL)
 # Optional second model the client switches to when the primary keeps
 # failing (see LLMClient). Empty means "no fallback".
 LLM_FALLBACK_MODEL = os.environ.get("LLM_FALLBACK_MODEL", "")

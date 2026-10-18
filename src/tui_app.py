@@ -24,7 +24,6 @@ Rich CLI when opentui cannot be imported.
 """
 
 import asyncio
-import math
 import os
 import queue
 import shutil
@@ -49,8 +48,6 @@ from opentui import (
 )
 
 from settings import (
-    DEFAULT_MODEL,
-    DEFAULT_NVIDIA_BASE_URL,
     load_settings,
     mask_key,
     reports_dir,
@@ -59,7 +56,6 @@ from settings import (
     update_settings,
 )
 from ui import theme, timings
-from ui.color_compat import run_proxy, should_proxy
 from runner_ui import QueueUI
 from utils.llm_client import fetch_models
 from main import DeepResearchAgent
@@ -339,6 +335,8 @@ def go(target: str) -> None:
 def provider_blurb(s=None) -> str:
     """One-line summary of the AI provider: model @ host."""
     llm = resolve_llm(s if s is not None else settings_sig())
+    if not (llm["base_url"] and llm["model"]):
+        return "Not configured"
     return f"{llm['model']} @ {endpoint_host(llm['base_url'])}"
 
 
@@ -777,13 +775,11 @@ def start_run() -> None:
 # --------------------------------------------------------------------------
 
 def model_screen(name: str, title: str, base_url: str, api_key: str,
-                 current_model: str, commit, allow_default: bool = False,
-                 extra_items: list = None) -> Box:
+                 current_model: str, commit, extra_items: list = None) -> Box:
     """Model picker with autodetect and type-to-search.
 
     Lists /models when reachable; otherwise falls back to manual entry with
-    the fetch error shown. commit(model_id) saves and navigates;
-    commit(None) keeps the current model; commit("") clears the selection.
+    the fetch error shown. commit(model_id) saves and navigates.
     """
     kick_model_fetch(base_url, api_key)
     res = models_sig()
@@ -791,9 +787,6 @@ def model_screen(name: str, title: str, base_url: str, api_key: str,
     def submit(value: str) -> None:
         raw = value.strip()
         if not raw:
-            if allow_default:
-                commit(None)
-                return
             set_notice("error", "Type a model id, or Esc to go back.")
             return
         clear_notice()
@@ -826,8 +819,6 @@ def model_screen(name: str, title: str, base_url: str, api_key: str,
 
     host = endpoint_host(base_url)
     items: list = []
-    if allow_default:
-        items.append({"label": "Keep default", "value": "__default__", "subtitle": DEFAULT_MODEL})
     for extra in (extra_items or []):
         items.append(extra)
     for mid in filtered:
@@ -842,9 +833,7 @@ def model_screen(name: str, title: str, base_url: str, api_key: str,
 
     def activate(item) -> None:
         value = item["value"]
-        if value == "__default__":
-            commit(None)
-        elif isinstance(value, str) and value.startswith("__use__"):
+        if isinstance(value, str) and value.startswith("__use__"):
             commit(value[len("__use__"):])
         elif value == "":
             commit("")
@@ -1465,7 +1454,10 @@ def screen_setup_welcome() -> Box:
 
 def screen_setup_endpoint() -> Box:
     def submit(value: str) -> None:
-        raw = value.strip().rstrip("/") or DEFAULT_NVIDIA_BASE_URL
+        raw = value.strip().rstrip("/")
+        if not raw:
+            set_notice("error", "Enter your endpoint URL to continue.")
+            return
         parsed = urlparse(raw)
         if not parsed.scheme or not parsed.netloc:
             set_notice("error", "Enter a full URL with scheme and host.")
@@ -1477,7 +1469,7 @@ def screen_setup_endpoint() -> Box:
     setup_endpoint_input = text_input(
         "setup-endpoint",
         value="",
-        placeholder="Any OpenAI-compatible URL (empty keeps NVIDIA)",
+        placeholder="Any OpenAI-compatible URL, e.g. https://host/v1",
         on_submit=submit,
     )
     return input_frame(
@@ -1516,7 +1508,7 @@ def screen_setup_llm_key() -> Box:
 
 def screen_setup_model() -> Box:
     setup = state.get("setup", {})
-    base_url = setup.get("llm_base_url", DEFAULT_NVIDIA_BASE_URL)
+    base_url = setup.get("llm_base_url", "")
     api_key = setup.get("llm_api_key", "")
 
     def commit(model) -> None:
@@ -1527,8 +1519,8 @@ def screen_setup_model() -> Box:
 
     return model_screen(
         "setup-model", "Setup (3/6) · AI model", base_url, api_key,
-        setup.get("llm_model") or resolve_llm(settings_sig())["model"],
-        commit, allow_default=True,
+        setup.get("llm_model") or resolve_llm(settings_sig())["model"] or "not set",
+        commit,
     )
 
 
@@ -1594,7 +1586,7 @@ def screen_setup_theme() -> Box:
         setup = state.get("setup", {})
         update_settings(
             llm_api_key=setup.get("llm_api_key", ""),
-            llm_base_url=setup.get("llm_base_url", DEFAULT_NVIDIA_BASE_URL),
+            llm_base_url=setup.get("llm_base_url", ""),
             **(({"llm_model": setup["llm_model"]} if setup.get("llm_model") else {})),
             tavily_api_key=setup.get("tavily_api_key", ""),
             **(({"reports_dir": setup["reports_dir"]} if "reports_dir" in setup else {})),
@@ -2056,13 +2048,14 @@ def run() -> None:
     # Fresh installs land in the setup wizard; everyone else gets the menu.
     try:
         current_settings = load_settings()
-        nvidia_key, tavily_key, _ = resolve_api_keys(current_settings)
-        has_keys = nvidia_key and tavily_key
+        llm = resolve_llm(current_settings)
+        _, tavily_key, _ = resolve_api_keys(current_settings)
+        has_keys = bool(llm["api_key"] and llm["base_url"] and llm["model"] and tavily_key)
     except Exception:
         has_keys = False
 
     if not has_keys:
-        set_notice("warn", "Add API keys in Settings (or environment variables) before starting research.")
+        set_notice("warn", "Finish setup: endpoint, model, and API keys are needed before research.")
 
     screen.set("setup-welcome" if not has_keys else "menu")
     try:

@@ -4,8 +4,9 @@ Stored as JSON outside the repo so a global install keeps working:
   POSIX: ~/.config/veritas/settings.json
   Windows: %APPDATA%/veritas/settings.json
 
-Precedence for API keys and base URL: explicit argument > environment
-variable (.env supported) > settings file > built-in default.
+Precedence for API keys and the endpoint: explicit argument > environment
+variable (.env supported) > settings file. No provider is bundled, so the
+base URL and model are empty until the user sets them.
 
 The file holds secrets (API keys), so it is created with mode 0o600
 on POSIX systems.
@@ -27,18 +28,15 @@ except ImportError:  # pragma: no cover - dotenv is a hard dependency in practic
 
 load_dotenv()
 
-DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-DEFAULT_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
-# Empty = no fallback. Used when the primary model keeps failing.
-DEFAULT_FALLBACK_MODEL = ""
-
+# No bundled endpoint/model: the user provides their own OpenAI-compatible
+# base URL and model id. Empty values force the setup wizard on first run.
 DEFAULTS: Dict[str, Any] = {
     "theme": "blue",
     "reports_dir": os.path.join(os.path.expanduser("~"), "Veritas", "reports"),
     "llm_api_key": "",
-    "llm_base_url": DEFAULT_NVIDIA_BASE_URL,
-    "llm_model": DEFAULT_MODEL,
-    "llm_fallback_model": DEFAULT_FALLBACK_MODEL,
+    "llm_base_url": "",
+    "llm_model": "",
+    "llm_fallback_model": "",
     "tavily_api_key": "",
     "max_iterations": 10,
     "max_search_results": 15,
@@ -50,10 +48,6 @@ DEFAULTS: Dict[str, Any] = {
         "general": True,
     },
 }
-
-# Pre-generic-provider keys. Still honored on load (migrated in memory),
-# but no longer written back to disk.
-LEGACY_KEYS = ("nvidia_api_key", "nvidia_api_base_url")
 
 
 def settings_dir() -> str:
@@ -70,7 +64,6 @@ def settings_path() -> str:
 def load_settings() -> Dict[str, Any]:
     """Load settings from disk, merged over defaults. Never raises."""
     merged = deepcopy(DEFAULTS)
-    stored: Dict[str, Any] = {}
     try:
         with open(settings_path(), "r", encoding="utf-8") as f:
             stored = json.load(f)
@@ -82,12 +75,6 @@ def load_settings() -> Dict[str, Any]:
                     merged[key] = value
     except (OSError, ValueError):
         pass
-    # One-time migration from the NVIDIA-only era.
-    if isinstance(stored, dict):
-        if not merged.get("llm_api_key") and stored.get("nvidia_api_key"):
-            merged["llm_api_key"] = stored["nvidia_api_key"]
-        if stored.get("nvidia_api_base_url") and merged.get("llm_base_url") in (DEFAULT_NVIDIA_BASE_URL, ""):
-            merged["llm_base_url"] = stored["nvidia_api_base_url"]
     return merged
 
 
@@ -121,21 +108,19 @@ def update_settings(**kwargs: Any) -> Dict[str, Any]:
 
 
 def resolve_llm(settings: Dict[str, Any] = None) -> Dict[str, str]:
-    """Resolve the LLM endpoint config: env (LLM_* then NVIDIA_*) wins over file."""
+    """Resolve the LLM endpoint config: env (LLM_*) wins over the settings file."""
     settings = settings if settings is not None else load_settings()
     api_key = (
         os.environ.get("LLM_API_KEY", "").strip()
-        or os.environ.get("NVIDIA_API_KEY", "").strip()
-        or str(settings.get("llm_api_key", "") or settings.get("nvidia_api_key", "")).strip()
+        or str(settings.get("llm_api_key", "")).strip()
     )
     base_url = (
         os.environ.get("LLM_BASE_URL", "").strip()
-        or os.environ.get("NVIDIA_API_BASE_URL", "").strip()
-        or str(settings.get("llm_base_url", "") or settings.get("nvidia_api_base_url", "") or DEFAULT_NVIDIA_BASE_URL).strip()
+        or str(settings.get("llm_base_url", "")).strip()
     )
     model = (
         os.environ.get("LLM_MODEL", "").strip()
-        or str(settings.get("llm_model", "") or DEFAULT_MODEL).strip()
+        or str(settings.get("llm_model", "")).strip()
     )
     fallback_model = (
         os.environ.get("LLM_FALLBACK_MODEL", "").strip()

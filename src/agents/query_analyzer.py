@@ -129,7 +129,6 @@ class QueryAnalyzerAgent:
             sub_q = SubQuestion(
                 id=str(uuid.uuid4()),
                 question=fq,
-                parent_id=parent_question.id,
                 priority=parent_question.priority - 1,  # Slightly lower priority
                 depth=parent_question.depth + 1,
                 status=QuestionStatus.PENDING,

@@ -1,5 +1,11 @@
 <p align="center"><img src="https://raw.githubusercontent.com/Nyvo2010/veritas/main/assets/mockup.png" alt="Veritas" width="560"></p>
 
+<p align="center">
+  <a href="https://github.com/Nyvo2010/veritas/actions/workflows/tests.yml"><img src="https://github.com/Nyvo2010/veritas/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license: MIT"></a>
+  <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="python 3.10+">
+</p>
+
 <p align="center"><sub>Made by Nyvø w/ love · Powered by Tavily</sub></p>
 
 # Veritas — Deep Research Agent
@@ -9,36 +15,48 @@ It decomposes your query, searches the web iteratively (Tavily), reasons over
 findings with an LLM, and writes a Markdown report to your reports folder — all
 behind a quiet, keyboard-driven TUI.
 
-Any **OpenAI-compatible endpoint** works as the research brain (NVIDIA NIM is
-the default). The model list is auto-detected from the endpoint's `/models`.
+Any **OpenAI-compatible endpoint** works as the research brain — there is no
+bundled provider. You supply the base URL, an API key, and a model id. The
+model list is auto-detected from the endpoint's `/models`.
 
 ## Install
 
 Requires Python 3.10+ (3.12/3.13 for the TUI).
 
+**One-line install** — builds an isolated virtualenv and puts the `veritas`
+command on your PATH:
+
 ```bash
-pip install "veritas[tui]"
+curl -fsSL https://raw.githubusercontent.com/Nyvo2010/veritas/main/install.sh | sh
 veritas
 ```
 
-`tui` is the full keyboard-driven interface (prebuilt wheels for CPython
-3.12/3.13 on macOS, Linux, Windows). Without it you get the classic Rich CLI
-with the same features:
+**With pip** — `tui` is the full keyboard-driven interface (prebuilt opentui
+wheels for CPython 3.12/3.13 on macOS, Linux, Windows). Without it you get the
+classic Rich CLI with the same features:
 
 ```bash
-pip install veritas
+pip install "veritas[tui]"   # full TUI
+# or
+pip install veritas          # classic Rich CLI
+veritas
 ```
 
 The `veritas` command installs to your Python scripts directory (on Linux/macOS
 usually `~/.local/bin`, which has to be on `PATH`).
 
-From source:
+**From source**:
 
 ```bash
+git clone https://github.com/Nyvo2010/veritas.git
+cd veritas
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[tui]"
 veritas
 ```
+
+Running `./install.sh` from a checkout builds that working tree instead of the
+published source and links the command for you.
 
 ## First run
 
@@ -83,12 +101,11 @@ A `.env` file (see `.env.example`) is the alternative path for non-interactive
 use — local dev, containers, CI, headless servers — or for temporarily
 overriding the file without touching it. Precedence everywhere:
 
-> explicit argument > environment variable > settings file > built-in default
+> explicit argument > environment variable > settings file
 
 Supported variables: `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`,
-`LLM_FALLBACK_MODEL`, `TAVILY_API_KEY` (legacy `NVIDIA_API_KEY` /
-`NVIDIA_API_BASE_URL` still work as fallback). `VERITAS_REPORTS_DIR` overrides
-the reports folder.
+`LLM_FALLBACK_MODEL`, `TAVILY_API_KEY`. `VERITAS_REPORTS_DIR` overrides the
+reports folder.
 
 If the primary model exhausts its retries, the client switches to the fallback
 model once and keeps using it for the rest of the run. Leave it empty to
@@ -143,8 +160,16 @@ and is never uploaded.
 ## Development
 
 ```bash
-python -m unittest discover -s tests    # no extra dependencies
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[tui]"          # omit [tui] to test the Rich CLI fallback
+python -m unittest discover -s tests
 ```
+
+The suite runs with no API keys: it covers report writing, the UI primitives,
+and — when opentui is importable — a headless render of every screen.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, and
+[SECURITY.md](SECURITY.md) for how to report a vulnerability.
 
 ## Roadmap
 

@@ -93,8 +93,7 @@ class SearchAgent:
                     title=result_data.get("title"),
                     content=result_data.get("content", ""),
                     score=result_data.get("score", 0.0),
-                    raw_content=result_data.get("raw_content"),
-                    favicon=result_data.get("favicon"),
+                    full_content=result_data.get("raw_content"),
                     category=result_data.get("category", "general"),
                     question_id=question.id,
                 )
