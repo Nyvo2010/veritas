@@ -453,8 +453,26 @@ def classic_main():
             sys.exit(0)
 
 
+def _version() -> str:
+    """Installed distribution version, or 'unknown' when run from a checkout."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+    except ImportError:  # pragma: no cover - Python < 3.8
+        return "unknown"
+    for name in ("veritas-cli", "veritas"):
+        try:
+            return version(name)
+        except PackageNotFoundError:
+            continue
+    return "unknown"
+
+
 def main():
     """Launch the OpenTUI app, falling back to the Rich CLI if needed."""
+    if len(sys.argv) > 1 and sys.argv[1] in ("-V", "--version"):
+        print(f"veritas {_version()}")
+        return
+
     # Non-truecolor terminals (Apple Terminal, and others without COLORTERM):
     # opentui's native engine emits 24-bit SGR runs these emulators cannot
     # parse, so re-exec this process behind a pty proxy that downconverts

@@ -1,0 +1,58 @@
+name: release
+
+# Tag a commit (e.g. `git tag v1.0.0 && git push origin v1.0.0`) to build the
+# sdist + wheel and publish a GitHub Release with them attached.
+#
+# PyPI publishing is gated behind the repository variable PYPI_PUBLISH so a tag
+# never fails before Trusted Publishing is configured. To enable it:
+#   1. PyPI → your account → Publishing → add a pending publisher for
+#      veritas-cli pointing at this repo, workflow "release.yml", environment
+#      "pypi".
+#   2. GitHub → Settings → Variables → Actions → add PYPI_PUBLISH = true.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade build
+      - run: python -m build
+      - name: Check the wheel installs and the command runs
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/python -m pip install --quiet dist/*.whl
+          /tmp/smoke/bin/veritas --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  pypi:
+    needs: build
+    if: ${{ vars.PYPI_PUBLISH == 'true' }}
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
