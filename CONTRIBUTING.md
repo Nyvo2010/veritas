@@ -4,15 +4,14 @@ Thanks for taking a look at Veritas. Issues and pull requests are welcome.
 
 ## Setup
 
+Requires Python 3.12+.
+
 ```bash
 git clone https://github.com/Nyvo2010/veritas.git
 cd veritas
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[tui]"
+pip install -e .
 ```
-
-Drop `[tui]` if you are working on the Rich CLI fallback or your Python has no
-prebuilt opentui wheel.
 
 ## Running the tests
 

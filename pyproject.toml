@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "veritas-cli"
-version = "1.0.0"
+version = "1.0.1"
 description = "Veritas Deep Research Agent - deep, iterative web research with a live terminal UI"
 readme = "README.md"
 license = "MIT"
@@ -16,13 +16,11 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "openai>=1.0.0",
     "tavily-python>=0.3.0",
@@ -30,14 +28,10 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "requests>=2.31.0",
     "rich>=13.0.0",
-]
-
-# Full keyboard-driven TUI. Prebuilt opentui wheels exist for CPython
-# 3.12/3.13 (macOS, Linux, Windows); without it `veritas` runs the
-# classic Rich CLI with the same features.
-[project.optional-dependencies]
-tui = [
-    "opentui>=0.1.2",
+    # The TUI engine. Its wheels only exist for CPython 3.12/3.13, so it is
+    # requested there and skipped elsewhere (the app then runs its Rich CLI,
+    # which is the same program). One install command either way.
+    "opentui>=0.1.2; python_version >= '3.12' and python_version < '3.14'",
 ]
 
 [tool.setuptools]
