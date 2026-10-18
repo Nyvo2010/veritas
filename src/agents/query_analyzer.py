@@ -88,6 +88,7 @@ class QueryAnalyzerAgent:
         parent_question: SubQuestion,
         analysis_result: Dict,
         state: ResearchState,
+        *,
         max_depth: int = 3,
         ui_manager=None
     ) -> List[SubQuestion]:

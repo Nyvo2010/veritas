@@ -11,12 +11,17 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
+import asyncio  # noqa: E402
+
 from main import DeepResearchAgent  # noqa: E402
+from agents.report_generator import ReportGeneratorAgent  # noqa: E402
+from utils.llm_client import LLMClient  # noqa: E402
 
 logging.getLogger("veritas").setLevel(logging.INFO)  # keep test output quiet
 from models.research_state import (  # noqa: E402
@@ -147,6 +152,116 @@ class PartialReportTests(unittest.TestCase):
         state.findings.append(KnowledgeFinding(content="kept", sources=[], confidence=0.4, question_id="q1"))
         agent.last_state = state
         self.assertIn("kept", agent.build_partial_report())
+
+
+class _FakeLLM:
+    """Returns each section after a per-title delay, completing out of order."""
+
+    def __init__(self, delays):
+        self.delays = delays
+        self.requested = []
+
+    def generate_section_async(self, *, section_title, theme_description,
+                               relevant_findings, main_query, style):
+        self.requested.append(section_title)
+
+        async def run():
+            await asyncio.sleep(self.delays[section_title])
+            return f"BODY:{section_title}"
+
+        return run()
+
+
+class SectionOrderTests(unittest.IsolatedAsyncioTestCase):
+    """Sections must come back in theme order even when they finish out of order.
+
+    Regression for a NameError on the parallel gather that dropped the section
+    index and then re-sorted by an undefined ``order``.
+    """
+
+    async def _run(self, themes, delays):
+        state = make_state("How do quantization schemes differ?")
+        state.findings.append(
+            KnowledgeFinding(content="f", sources=["s"], confidence=0.9, question_id="q1")
+        )
+        agent = ReportGeneratorAgent(_FakeLLM(delays))
+        return await agent._generate_sections_parallel(state, {"themes": themes}, "comprehensive")
+
+    async def test_order_follows_themes_not_completion(self):
+        themes = [{"title": "Alpha"}, {"title": "Beta"}, {"title": "Gamma"}]
+        delays = {"Alpha": 0.03, "Beta": 0.02, "Gamma": 0.01}  # reverse completion
+        sections, failed = await self._run(themes, delays)
+        self.assertEqual(failed, 0)
+        self.assertEqual([s.title for s in sections], ["Alpha", "Beta", "Gamma"])
+        self.assertEqual([s.order for s in sections], [0, 1, 2])
+        self.assertEqual([s.content for s in sections], ["BODY:Alpha", "BODY:Beta", "BODY:Gamma"])
+
+    async def test_a_failed_section_is_counted_but_keeps_its_slot(self):
+        themes = [{"title": "Alpha"}, {"title": "Beta"}]
+
+        class _Boom(_FakeLLM):
+            def generate_section_async(self, *, section_title, **kw):
+                async def run():
+                    if section_title == "Alpha":
+                        raise RuntimeError("boom")
+                    return f"BODY:{section_title}"
+
+                return run()
+
+        state = make_state()
+        agent = ReportGeneratorAgent(_Boom({}))
+        sections, failed = await agent._generate_sections_parallel(state, {"themes": themes}, "comprehensive")
+        self.assertEqual(failed, 1)
+        self.assertEqual([s.title for s in sections], ["Alpha", "Beta"])
+        self.assertIn("failed", sections[0].content.lower())
+
+
+class _SyncSectionLLM(LLMClient):
+    """An LLMClient with no network setup whose sync section path is recorded."""
+
+    def __init__(self):
+        self.model = "stub-model"
+        self.fallback_model = ""
+        self.using_fallback = False
+        self._rate_limit_delay = 0.0
+        self._last_api_call = 0.0
+        self._sync_lock = threading.Lock()
+        self.seen = []
+
+    def _generate_section_sync(self, section_title, theme_description,
+                               relevant_findings, main_query, style="comprehensive"):
+        self.seen.append((section_title, threading.current_thread().name))
+        return f"BODY:{section_title}"
+
+
+class SectionThreadPathTests(unittest.IsolatedAsyncioTestCase):
+    """Sections must be produced by the sync client on a worker thread.
+
+    The async OpenAI transport (anyio/httpcore TLS) resets the connection on
+    some platforms even though the sync client works, so
+    ``generate_section_async`` must not depend on an async client.
+    """
+
+    async def test_async_wrapper_uses_the_sync_path(self):
+        llm = _SyncSectionLLM()
+        out = await llm.generate_section_async("Alpha", "d", [], "q")
+        self.assertEqual(out, "BODY:Alpha")
+        self.assertEqual([t for t, _ in llm.seen], ["Alpha"])
+
+    async def test_no_async_client_is_required(self):
+        llm = _SyncSectionLLM()
+        self.assertFalse(hasattr(llm, "async_client"))
+        out = await llm.generate_section_async("Beta", "d", [], "q")
+        self.assertEqual(out, "BODY:Beta")
+
+    async def test_each_section_runs_off_the_event_loop_thread(self):
+        llm = _SyncSectionLLM()
+        results = await asyncio.gather(*[
+            llm.generate_section_async(f"S{i}", "d", [], "q") for i in range(5)
+        ])
+        self.assertEqual(results, [f"BODY:S{i}" for i in range(5)])
+        loop_thread = threading.current_thread().name
+        self.assertTrue(all(name != loop_thread for _, name in llm.seen))
 
 
 if __name__ == "__main__":

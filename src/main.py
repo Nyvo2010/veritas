@@ -326,7 +326,7 @@ class DeepResearchAgent:
                             question,
                             analysis,
                             state,
-                            ui,
+                            ui_manager=ui,
                         ),
                         kind="llm", label=f"follow_ups[{iteration}]", ui=ui,
                     )

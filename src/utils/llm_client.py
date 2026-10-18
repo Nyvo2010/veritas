@@ -14,16 +14,60 @@ import json
 import re
 import time
 import asyncio
+import threading
 from typing import List, Dict
 from urllib.parse import urlparse
 
 import httpx
 import logging
-from openai import OpenAI, AsyncOpenAI
+from openai import OpenAI
 
 from utils.text import clip
 
 log = logging.getLogger("veritas.llm")
+
+
+# Voice and format contract shared by every long-form report prompt, so the
+# sections and the executive summary read as one document instead of a set of
+# unrelated essays. Keep this in one place and inject it, rather than letting
+# each prompt drift.
+#
+# The document is assembled by ReportGeneratorAgent._assemble_report, which
+# adds the report title, the "EXECUTIVE SUMMARY" / "UNCERTAINTIES & KNOWLEDGE
+# GAPS" / "SOURCES" headings, the ═ rule lines, the upper-cased section
+# headings, and the global source numbering. The model must never reproduce
+# any of that structure itself.
+REPORT_STYLE_GUIDE = """VOICE
+- Clear third-person analytic prose. No first person ("I", "we"), no
+  meta-commentary about the research process, no "as an AI".
+- Normal sentence case. Do NOT use ALL-CAPS for emphasis.
+- Lead with the finding, then back it with evidence. No generic introductions,
+  no restating the question, no empty conclusions or "in summary" filler.
+- Prefer specific, verifiable claims (numbers, names, mechanisms) over
+  adjectives; state uncertainty plainly instead of hedging with filler.
+
+DOCUMENT FORMAT (Markdown)
+- Return only the body text of this part. Do NOT write a document title, a
+  top-level "#"/"##" heading, the section's own name, "EXECUTIVE SUMMARY",
+  "SOURCES", or rule lines such as "════"; the report assembler adds all of
+  those around your text.
+- Use "### Subheading" (sentence-style, no trailing colon) to break the text
+  into 2-4 subsections when the material has distinct parts. Do not use "#" or
+  "##". Do not nest headings.
+- Write flowing paragraphs of roughly 3-6 sentences. Use "-" bullet lists only
+  when the content is genuinely enumerable, keep them at a single level with no
+  nested bullets, and never let a list replace the analysis.
+- Use **bold** sparingly, for a key term at most, never for whole sentences.
+  Avoid italics for emphasis. Do not use emoji. Do not use tables.
+- Match the section's expected length; do not pad to reach it.
+
+CITATIONS
+- Cite supplied evidence inline as [Source N] immediately after the claim it
+  supports, using the numbers given in the evidence list, e.g. "memory
+  bandwidth caps throughput [Source 3]".
+- Multiple sources for one claim: [Source 1][Source 4].
+- Never invent, renumber, merge, or cite a source number that was not in the
+  evidence list you were given."""
 
 
 def _prompt_size(messages) -> tuple:
@@ -53,13 +97,6 @@ try:
 except ImportError as e:
     raise ImportError("The 'config' module is missing or not found. Ensure it exists and is in the Python path.") from e
 
-# A single report section: how long one request may take, and how many times
-# it is worth retrying before the section is written off. Sections run in
-# parallel and the report is still assembled from the survivors, so one stall
-# must not be able to consume the whole run's time budget.
-SECTION_REQUEST_TIMEOUT = 180.0
-SECTION_MAX_ATTEMPTS = 3
-
 
 def _tolerant_loads(candidate: str) -> Dict:
     """Parse a JSON candidate, tolerating common model output mistakes.
@@ -83,31 +120,18 @@ def _tolerant_loads(candidate: str) -> Dict:
     return json.loads(candidate)  # Re-raise the informative strict error
 
 
-def _extract_json(text: str) -> Dict:
-    """Parse JSON from model output, tolerating markdown code fences.
+def _close_open_json(text: str) -> str:
+    """Close a truncated JSON document so it parses as far as it got.
 
-    Reasoning models (like Nemotron Lightning) sometimes wrap JSON in
-    ```json ... ``` blocks or prepend reasoning text. This helper strips
-    fences and extracts the first balanced {...} object.
+    Walks the text tracking string/escape state and the stack of open
+    containers, then terminates the dangling string (if any), drops a
+    trailing separator, and appends the matching closers. Best effort: the
+    caller still validates the result.
     """
-    cleaned = text.strip()
-    # Strip markdown code fences
-    fence_match = re.search(r"```(?:json)?\s*(.*?)```", cleaned, re.DOTALL)
-    if fence_match:
-        cleaned = fence_match.group(1).strip()
-    try:
-        return _tolerant_loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-    # Fall back to first balanced {...} block
-    start = cleaned.find("{")
-    if start == -1:
-        raise json.JSONDecodeError("No JSON object found", text, 0)
-    depth = 0
     in_string = False
     escape = False
-    for i in range(start, len(cleaned)):
-        ch = cleaned[i]
+    stack: List[str] = []
+    for ch in text:
         if in_string:
             if escape:
                 escape = False
@@ -115,7 +139,89 @@ def _extract_json(text: str) -> Dict:
                 escape = True
             elif ch == '"':
                 in_string = False
-        else:
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack:
+            stack.pop()
+
+    out = text
+    if in_string:
+        out += '"'
+    out = out.rstrip()
+    while out and out[-1] in ",:":
+        out = out[:-1].rstrip()
+    return out + "".join(reversed(stack))
+
+
+def _repair_truncated_json(text: str, max_cuts: int = 8) -> str:
+    """Salvage a document cut off mid-value by closing it, backtracking if needed."""
+    candidate = text
+    for _ in range(max_cuts + 1):
+        closed = _close_open_json(candidate)
+        try:
+            json.loads(closed, strict=False)
+            return closed
+        except json.JSONDecodeError:
+            cut = max(candidate.rfind(","), candidate.rfind("{"), candidate.rfind("["))
+            if cut <= 0:
+                break
+            candidate = candidate[:cut]
+    return _close_open_json(text)
+
+
+def _looks_truncated(error: json.JSONDecodeError, content: str) -> bool:
+    """Heuristic: an error at the very end of the reply means it ran out of tokens."""
+    if not content:
+        return False
+    if "Unterminated string" in str(error):
+        return True
+    return error.pos >= max(0, len(content) - 2)
+
+
+def _extract_json(text: str) -> Dict:
+    """Parse JSON from model output, tolerating fences, prose, and truncation.
+
+    Reasoning models sometimes wrap JSON in ```json``` blocks, prepend
+    reasoning text, or run out of tokens mid-document. This strips fences,
+    extracts the first balanced {...} object, and finally salvages a
+    truncated document so a cut-off reply still yields partial data.
+    """
+    cleaned = text.strip()
+    # Strip markdown code fences
+    fence_match = re.search(r"```(?:json)?\s*(.*?)```", cleaned, re.DOTALL)
+    if fence_match:
+        cleaned = fence_match.group(1).strip()
+
+    candidates = [cleaned]
+    start = cleaned.find("{")
+    if start != -1 and start > 0:
+        candidates.append(cleaned[start:])
+
+    last_error = None
+    for candidate in candidates:
+        try:
+            return _tolerant_loads(candidate)
+        except json.JSONDecodeError as e:
+            last_error = e
+
+    # Fall back to the first balanced {...} block.
+    if start != -1:
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(cleaned)):
+            ch = cleaned[i]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
             if ch == '"':
                 in_string = True
             elif ch == "{":
@@ -123,9 +229,21 @@ def _extract_json(text: str) -> Dict:
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
-                    return _tolerant_loads(cleaned[start:i + 1])
-    # Last resort: try raw parse and let it raise
-    return _tolerant_loads(cleaned)
+                    try:
+                        return _tolerant_loads(cleaned[start:i + 1])
+                    except json.JSONDecodeError as e:
+                        last_error = e
+                    break
+
+    # Last resort: the reply was cut off — salvage what completed.
+    for candidate in candidates:
+        try:
+            return _tolerant_loads(_repair_truncated_json(candidate))
+        except json.JSONDecodeError as e:
+            last_error = e
+
+    raise last_error if last_error else json.JSONDecodeError("No JSON object found", text, 0)
+
 
 
 def fetch_models(api_base_url: str, api_key: str, timeout: float = 15.0) -> List[str]:
@@ -192,11 +310,6 @@ class LLMClient:
             base_url=self.api_base_url,
             timeout=timeout,
         )
-        self.async_client = AsyncOpenAI(
-            api_key=resolved_key,
-            base_url=self.api_base_url,
-            timeout=timeout,
-        )
         self.model = ((model if model is not None else LLM_MODEL) or "").strip()
         if not self.model:
             raise ValueError(
@@ -210,7 +323,13 @@ class LLMClient:
         self.max_retries = MAX_RETRIES
         self.retry_delay = RETRY_DELAY
         self._last_api_call = 0  # Track last API call time for rate limiting
-        self._rate_limit_delay = 1.0  # Minimum 1 second between API calls
+        # Minimum seconds between API calls. Widen it on rate-limited tiers
+        # (e.g. a free Gemini key) with VERITAS_LLM_RATE_LIMIT_DELAY.
+        try:
+            self._rate_limit_delay = float(os.environ.get("VERITAS_LLM_RATE_LIMIT_DELAY") or "1.0")
+        except ValueError:
+            self._rate_limit_delay = 1.0
+        self._sync_lock = threading.Lock()  # serialises threaded section calls
         self._last_finish_reason = None  # finish_reason of the most recent completion
 
     def _normalize_base_url(self, api_base_url: str) -> str:
@@ -286,19 +405,19 @@ class LLMClient:
         time.sleep(delay)
         return True
 
-    async def _handle_rate_limit_async(self, attempt: int) -> bool:
-        """Async version of rate limit handler"""
-        if attempt >= self.max_retries:
-            return False
+    def _throttle_sync(self) -> None:
+        """Space threaded section calls at least ``_rate_limit_delay`` apart.
 
-        if EXPONENTIAL_BACKOFF:
-            delay = self.retry_delay * (2 ** attempt)
-        else:
-            delay = self.retry_delay
-
-        log.debug(f"   Rate limit hit. Waiting {delay}s before retry {attempt + 1}/{self.max_retries}...")
-        await asyncio.sleep(delay)
-        return True
+        Report sections run concurrently on a thread pool; without a lock they
+        all read the same ``_last_api_call`` and fire in a burst, which trips
+        free-tier rate limits. Holding one lock across the wait-then-stamp
+        serialises their request start times.
+        """
+        with self._sync_lock:
+            wait = self._rate_limit_delay - (time.time() - self._last_api_call)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_api_call = time.time()
 
     def chat_completion(
         self,
@@ -349,6 +468,7 @@ class LLMClient:
 
         chars, count = _prompt_size(messages)
         attempt = 0
+        last_error = None
 
         while attempt < self.max_retries:
             started = time.perf_counter()
@@ -392,14 +512,25 @@ class LLMClient:
                 log.error("cannot reach %s: %s", self.api_base_url, e)
                 self._raise_connection_error(e)
             except Exception as e:
+                last_error = e
                 error_str = str(e).lower()
                 log.warning(
                     "chat completion failed after %.2fs (attempt %s/%s): %s",
                     time.perf_counter() - started, attempt + 1, self.max_retries, e,
                 )
 
-                # Handle rate limiting
-                if "rate" in error_str or "429" in error_str:
+                # Handle rate limiting (match real limit signals only — a bare
+                # "rate" substring also matches echoed params like "temperature")
+                if ("429" in error_str or "rate limit" in error_str
+                        or "rate_limit" in error_str or "quota" in error_str
+                        or "resource_exhausted" in error_str
+                        or "too many requests" in error_str):
+                    if attempt >= self.max_retries - 1:
+                        raise Exception(
+                            f"Rate limited by the LLM API after {self.max_retries} attempts. "
+                            "Raise VERITAS_LLM_RATE_LIMIT_DELAY, use a lighter model, or check "
+                            f"your quota: {e}"
+                        )
                     if not self._handle_rate_limit_sync(attempt):
                         raise Exception(f"Max retries ({self.max_retries}) exceeded due to rate limiting")
                     attempt += 1
@@ -415,21 +546,33 @@ class LLMClient:
                 elif "400" in error_str or "bad request" in error_str:
                     raise Exception(f"Bad request to the LLM API: {e}")
 
+                # Handle unknown-model / bad-endpoint errors (don't retry)
+                elif "404" in error_str or "not found" in error_str:
+                    raise Exception(
+                        f"Model or endpoint not found by the LLM API (check the model id "
+                        f"in Settings): {e}"
+                    )
+
                 # Handle auth errors (don't retry)
                 elif "401" in error_str or "403" in error_str or "unauthorized" in error_str or "forbidden" in error_str:
                     raise Exception(f"LLM API authentication failed (check the API key): {e}")
 
-                # Handle general API errors
-                elif "api" in error_str or "500" in error_str or "503" in error_str:
+                # Handle general API / transient network errors
+                elif ("api" in error_str or "500" in error_str or "503" in error_str
+                      or "connection" in error_str or "connect" in error_str
+                      or "reset" in error_str or "temporarily" in error_str):
                     if attempt >= self.max_retries - 1:
                         raise Exception(f"API error after {self.max_retries} attempts: {e}")
-                    time.sleep(self.retry_delay)
+                    time.sleep(self.retry_delay * (2 ** attempt))
                     attempt += 1
 
                 else:
                     raise
 
-        raise Exception(f"Failed to complete request after {self.max_retries} attempts")
+        raise Exception(
+            f"Failed to complete request after {self.max_retries} attempts"
+            + (f": {last_error}" if last_error else "")
+        )
 
     # Nudge sent to the model when its previous reply was not parseable JSON.
     _JSON_REPAIR_NUDGE = (
@@ -487,7 +630,8 @@ class LLMClient:
                 last_error = e
                 if parse_attempt >= max_parse_retries:
                     break
-                if self._last_finish_reason == "length":
+                truncated = self._last_finish_reason == "length" or _looks_truncated(e, content)
+                if truncated:
                     current_max_tokens = min(int(current_max_tokens * 1.5) + 512, 16000)
                     log.warning(
                         "json truncated (attempt %s/%s); retrying with max_tokens=%s",
@@ -677,43 +821,57 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
 
         return self.chat_json(messages, max_tokens=3000)
 
-    async def generate_section_async(
-        self,
-        section_title: str,
-        theme_description: str,
-        relevant_findings: List[Dict],
-        main_query: str,
-        style: str = "comprehensive"
-    ) -> str:
-        """Section generation with the primary model, falling back once on failure."""
-        try:
-            return await self._generate_section_async(
-                section_title, theme_description, relevant_findings, main_query, style, self.model
-            )
-        except Exception as exc:
-            fallback = (self.fallback_model or "").strip()
-            if not fallback or fallback == self.model:
-                raise
-            log.warning(
-                "Model %r failed generating section %r (%s); retrying with fallback %r",
-                self.model, section_title, exc, fallback,
-            )
-            self.model = fallback
-            self.using_fallback = True
-            return await self._generate_section_async(
-                section_title, theme_description, relevant_findings, main_query, style, fallback
-            )
-
-    async def _generate_section_async(
+    def generate_section(
         self,
         section_title: str,
         theme_description: str,
         relevant_findings: List[Dict],
         main_query: str,
         style: str = "comprehensive",
-        current_model: str = None,
     ) -> str:
-        """Generate a single report section asynchronously.
+        """Generate one report section (sync) with primary -> fallback retry."""
+        return self._with_fallback(
+            self._generate_section_sync,
+            section_title,
+            theme_description,
+            relevant_findings,
+            main_query,
+            style,
+        )
+
+    async def generate_section_async(
+        self,
+        section_title: str,
+        theme_description: str,
+        relevant_findings: List[Dict],
+        main_query: str,
+        style: str = "comprehensive",
+    ) -> str:
+        """Generate one report section without blocking the event loop.
+
+        Sections used to go through the async OpenAI client, but its async TLS
+        stack (anyio/httpcore) fails with a connection reset on some platforms
+        even though the sync client works fine. Running the sync path on a
+        worker thread keeps sections overlapping without that failure mode.
+        """
+        return await asyncio.to_thread(
+            self.generate_section,
+            section_title,
+            theme_description,
+            relevant_findings,
+            main_query,
+            style,
+        )
+
+    def _generate_section_sync(
+        self,
+        section_title: str,
+        theme_description: str,
+        relevant_findings: List[Dict],
+        main_query: str,
+        style: str = "comprehensive",
+    ) -> str:
+        """Generate a single report section.
 
         Args:
             section_title: Section heading (added automatically).
@@ -721,34 +879,23 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
             relevant_findings: Findings fed to this section.
             main_query: The user's original question.
             style: Writing style (comprehensive, concise, technical).
-            current_model: Model in play right now (may be the fallback).
         """
 
-        system_prompt = f"""You are an expert analyst writing a SPECIFIC, FOCUSED section for a research report.
+        system_prompt = f"""You are an expert analyst writing one section of a research report.
 
-CRITICAL: This section must ONLY address the main research query: "{main_query}"
-- Stay 100% focused on this specific topic
-- Do NOT drift to tangentially related subjects
-- Base ALL analysis on findings directly relevant to this query
+Scope: this section speaks only to the main research query — "{main_query}".
+Target style: {style}. Stay on topic, do not drift to tangentially related
+subjects, and base every claim on the evidence provided.
 
-CRITICAL REQUIREMENTS:
-- Write 1000-1800 words of ORIGINAL, SPECIFIC analysis
-- Focus on the UNIQUE aspects of this particular theme
-- Use CONCRETE examples, data, and evidence - no generic statements
-- Cite specific sources frequently [Source X]
-- Avoid generic introductions or conclusions
-- NO repetition of information that would appear in other sections
-- Dive deep into the specific mechanisms, dynamics, or patterns
-- Include counterarguments, nuances, and limitations
+Write 1000-1800 words of original analysis that:
+- examines the specific mechanisms, dynamics, or patterns behind this theme
+- uses concrete examples, figures, and evidence rather than generalities
+- includes counterarguments, nuances, and limitations where they exist
+- avoids material that other sections would already cover
 
-Style: {style}
-- Clear, analytical prose with specific claims
-- Evidence-based arguments with proper citations
-- Logical flow between paragraphs
-- Focus on INSIGHTS, not just description
+{REPORT_STYLE_GUIDE}
 
-DO NOT include the section title as a heading (it will be added automatically).
-Start directly with substantive content."""
+Return only the section body; its heading is added automatically."""
 
 
         findings_text = "\n\n".join([
@@ -765,83 +912,41 @@ Unique Angle: {theme_description}
 Relevant Evidence:
 {findings_text}
 
-Write a SPECIFIC, IN-DEPTH section (1000-1800 words) exploring this unique theme:
+Write this section (1000-1800 words), exploring the theme in depth:
 
 STRUCTURE:
 1. Open with the most important insight or finding (no generic intro)
-2. Develop 3-4 distinct sub-points with concrete evidence
+2. Develop 3-4 distinct sub-points, each with concrete evidence
 3. Include specific examples, data points, and mechanisms
 4. Address nuances, limitations, or counterarguments
-5. Synthesize how these points connect to the broader research question
+5. Connect the points back to the broader research question
 
-Focus on DEPTH over BREADTH. This section should reveal something specific and insightful, not generic observations. Use extensive citations."""
+Prioritise depth over breadth: reveal something specific and well-evidenced,
+not generic observations. Cite the evidence above as [Source N]."""
 
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
 
-        # Use report model with high token limit
-        # Rate limiting: ensure at least 1 second between API calls
-        current_time = time.time()
-        time_since_last_call = current_time - self._last_api_call
-        if time_since_last_call < self._rate_limit_delay:
-            await asyncio.sleep(self._rate_limit_delay - time_since_last_call)
+        # Rate limiting: keep concurrent sections spaced out on the wire.
+        self._throttle_sync()
 
         chars, count = _prompt_size(messages)
-        attempt = 0
         started = time.perf_counter()
         log.info("section %r -> %s | %s msgs, %s chars, max_tokens=%s",
                  section_title, self.model, count, chars, REPORT_SECTION_MAX_TOKENS)
-        while True:
-            try:
-                self._last_api_call = time.time()  # Update last call time
-
-                params = {
-                    "model": self.model,
-                    "messages": messages,
-                    "temperature": TEMPERATURE_CREATIVE,
-                    "max_tokens": REPORT_SECTION_MAX_TOKENS,
-                    "top_p": TOP_P,
-                }
-
-                # Add timeout to prevent hanging
-                response = await asyncio.wait_for(
-                    self.async_client.chat.completions.create(**params),
-                    timeout=SECTION_REQUEST_TIMEOUT
-                )
-                content = response.choices[0].message.content
-                log.info("section %r <- %s chars in %.1fs",
-                         section_title, len(content or ""), time.perf_counter() - started)
-                return content or ""
-
-            except asyncio.TimeoutError:
-                log.warning("section %r timed out (attempt %s/%s, %.1fs elapsed)",
-                            section_title, attempt + 1, self.max_retries,
-                            time.perf_counter() - started)
-                if attempt >= SECTION_MAX_ATTEMPTS - 1:
-                    raise Exception(
-                        f"Report section timed out after {SECTION_MAX_ATTEMPTS} attempts"
-                    )
-                await asyncio.sleep(self.retry_delay)
-                attempt += 1
-
-            except Exception as e:
-                error_str = str(e).lower()
-                log.warning("section %r failed (attempt %s): %s",
-                            section_title, attempt + 1, e)
-
-                # Handle rate limiting
-                if "rate" in error_str or "429" in error_str or "capacity" in error_str:
-                    if not await self._handle_rate_limit_async(attempt):
-                        raise Exception(f"Rate limit exceeded after {self.max_retries} attempts")
-                    attempt += 1
-                    continue
-
-                if attempt >= SECTION_MAX_ATTEMPTS - 1:
-                    raise Exception(f"Report generation failed: {str(e)}")
-                await asyncio.sleep(self.retry_delay)
-                attempt += 1
+        # _chat_completion already handles retries, backoff and rate-limit
+        # pauses, so the section path reuses it rather than re-implementing them.
+        content = self._chat_completion(
+            messages=messages,
+            temperature=TEMPERATURE_CREATIVE,
+            max_tokens=REPORT_SECTION_MAX_TOKENS,
+            top_p=TOP_P,
+        )
+        log.info("section %r <- %s chars in %.1fs",
+                 section_title, len(content or ""), time.perf_counter() - started)
+        return content or ""
 
     def generate_executive_summary(
         self,
@@ -861,27 +966,21 @@ Focus on DEPTH over BREADTH. This section should reveal something specific and i
         key_findings: List[str]
     ) -> str:
         """Generate executive summary after all sections are complete"""
-        system_prompt = """You are an expert at writing CONCISE, INSIGHTFUL executive summaries.
+        system_prompt = f"""You are an expert analyst writing the executive summary of a research report.
 
-Create a focused executive summary (600-900 words) that:
-- Clearly states the research question and its importance
-- Highlights 5-7 KEY findings with specific details (not generic statements)
-- Identifies major insights and patterns that emerged
-- Discusses practical implications
-- Notes important limitations or uncertainties
-- Maintains a clear, accessible tone
+Write 600-900 words that:
+- state the research question and why it matters
+- surface the 5-7 most important findings, each with concrete detail
+- draw out the patterns and tensions across the findings
+- note the practical implications and the important limitations or uncertainties
 
-AVOID:
-- Generic statements or platitudes
-- Repeating section content verbatim
-- Long-winded explanations
-- Academic jargon without explanation
+        {REPORT_STYLE_GUIDE}
 
-FOCUS ON:
-- Specific, actionable insights
-- Concrete findings backed by evidence
-- Clear, direct language
-- What's surprising or important about the findings"""
+        Unlike the sections, this summary has no numbered source list, so omit
+        the [Source N] markers here — the sections carry the citations.
+
+        The summary must stand alone: do not refer to "the report", "the sections
+        above", or the research process itself."""
 
         sections_preview = "\n\n".join([
             f"Section {i+1} key points:\n{s[:500]}..."
@@ -898,7 +997,8 @@ Key Findings:
 Section Previews:
 {sections_preview}
 
-Write a FOCUSED executive summary (600-900 words) that captures the most important insights and findings. Be specific and actionable, avoiding generic statements."""
+Write the executive summary (600-900 words) capturing the most important
+insights. Be specific and actionable; avoid generic statements."""
 
         messages = [
             {"role": "system", "content": system_prompt},

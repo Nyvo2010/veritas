@@ -383,11 +383,18 @@ def list_hint(enter: str, back: str = None, search: bool = False) -> Text:
 
 
 def input_frame(title: str, lines: list, inp, enter: str, back: str, kind: str = "Type") -> Box:
-    """Text-entry skeleton: prompt lines, one blank line, the field, the hint."""
+    """Text-entry skeleton: prompt lines, one blank line, the field, the hint.
+
+    The trailing gap is load-bearing: an Input is a native widget, and when it
+    is the last child the panel's bottom padding collapses, leaving the field
+    flush against the hint. The explicit blank line restores the same bottom
+    breathing room every other panel gets.
+    """
     interior = list(lines)
     if interior:
         interior.append(gap())   # one blank line between the prompt and the field
     interior.append(inp)
+    interior.append(gap())       # native Input swallows the panel's bottom padding
     return page(
         panel(title, *interior),
         gap(),
@@ -1010,7 +1017,7 @@ def screen_run() -> Box:
             Row(
                 Text(lambda: progress_parts()[0], fg=accent()),
                 Text(lambda: progress_parts()[1], fg=TERTIARY),
-                Text(lambda: progress_parts()[2], fg=SECONDARY),
+                Text(lambda: progress_parts()[2], fg=SECONDARY, bold=True),
             ),
             Text(lambda: clock_line(), fg=SECONDARY),
             Text(lambda: timing_line(), fg=TERTIARY),
@@ -1659,9 +1666,12 @@ SCREEN_BUILDERS = {
 # Progress bar + live activity
 # --------------------------------------------------------------------------
 
+SUFFIX_WIDTH = 5   # " 100%": a space plus up to three digits and a percent sign
+
+
 def bar_width() -> int:
-    """Bar width: the panel interior minus the percent suffix (" 100%")."""
-    return max(12, inner_width() - 5)
+    """Bar cells: the panel interior minus the right-aligned percent suffix."""
+    return max(12, inner_width() - SUFFIX_WIDTH)
 
 
 def particles_for(width: int) -> int:
@@ -1679,15 +1689,31 @@ def activity_rows() -> int:
     return max(4, term_height() - 14 - MARGIN_TOP)
 
 
+_bar_frame = {"key": None, "parts": ("", "", "")}
+
+
 def progress_parts() -> tuple:
-    """The bar as (filled, track, percent) so each part can be colored."""
+    """The bar as (filled, track, percent), always exactly inner_width wide.
+
+    The percent is right-aligned by padding the *track*, never the suffix: a
+    Text child that begins with a space is dropped when it is a Row child in
+    this OpenTUI build, so the suffix must start with a digit. Memoised per
+    frame so the three row cells share one computation.
+    """
     completed, total, _ = prog_sig()
     ratio = min(1.0, completed / total) if total else 0.0
     width = bar_width()
+    key = (round(ratio, 4), anim_sig(), width)
+    if _bar_frame["key"] == key:
+        return _bar_frame["parts"]
     filled, track = theme.braille_bar(
         ratio, width, anim_sig() * ANIM_TRAVEL, particles_for(width)
     )
-    return filled, track, f" {ratio * 100:.0f}%"
+    percent = f"{ratio * 100:.0f}%"
+    track = track + " " * max(0, SUFFIX_WIDTH - len(percent))
+    _bar_frame["key"] = key
+    _bar_frame["parts"] = (filled, track, percent)
+    return _bar_frame["parts"]
 
 
 def clock_line() -> str:
@@ -1715,19 +1741,23 @@ def timing_line() -> str:
     return "  ·  ".join(parts)
 
 
-def activity_line(elapsed: float, level: str, text: str) -> Text:
-    """One log line: time gutter, level glyph, and a single-line message.
+def activity_line(elapsed: float, level: str, text: str):
+    """One log line: a level glyph and message, with the run clock on the right.
 
-    Messages are trimmed to the panel so the log block keeps its height: a
-    wrapped line would push the progress bar down mid-run. Phase entries are
-    headings — no gutter, accented bar, bold — so a run reads as sections.
+    Messages start at the panel edge and the elapsed time is right-aligned, so
+    the block keeps a flat left margin (a wide time gutter pushed everything
+    in) while still reading as a timeline. Messages are trimmed to one line:
+    a wrapped line would push the progress bar down mid-run. Phase entries are
+    headings — accented marker, bold, no time — so a run reads as sections.
     """
     if level == "phase":
-        return Text(f"{'':>7}  ▎{fit(text, max(8, inner_width() - 11))}", fg=accent(), bold=True)
-    room = max(8, inner_width() - 11)   # gutter + glyph + spaces
-    return Text(
-        f"{theme.format_duration(elapsed):>7}  {LOG_GLYPH.get(level, '·')} {fit(text, room)}",
-        fg=log_color(level),
+        return Text(f"▎{fit(text, max(8, inner_width() - 1))}", fg=accent(), bold=True)
+    clock = theme.format_duration(elapsed)
+    tail = len(clock) + 1                     # right-aligned clock plus one space
+    body = fit(f"{LOG_GLYPH.get(level, '·')} {text}", max(8, inner_width() - tail))
+    return Row(
+        Text(body.ljust(inner_width() - tail), fg=log_color(level)),
+        Text(clock, fg=TERTIARY),
     )
 
 
