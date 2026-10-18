@@ -26,16 +26,10 @@ class SubQuestion:
     """Represents a research sub-question"""
     id: str
     question: str
-    parent_id: Optional[str] = None
     status: QuestionStatus = QuestionStatus.PENDING
     priority: int = 0  # Higher = more important
     depth: int = 0  # How many levels deep in the question tree
-    created_at: datetime = field(default_factory=datetime.now)
-    completed_at: Optional[datetime] = None
     answer: Optional[str] = None
-    sources: List[str] = field(default_factory=list)
-    follow_up_questions: List[str] = field(default_factory=list)
-    gaps_identified: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -45,11 +39,8 @@ class SearchResult:
     title: str
     content: str
     score: float
-    raw_content: Optional[str] = None
     full_content: Optional[str] = None  # Full webpage content
-    favicon: Optional[str] = None
     category: Optional[str] = None  # social, educational, etc.
-    timestamp: datetime = field(default_factory=datetime.now)
     question_id: Optional[str] = None
 
 
@@ -61,8 +52,6 @@ class KnowledgeFinding:
     confidence: float  # 0-1
     question_id: str
     contradictions: List[str] = field(default_factory=list)
-    supporting_facts: List[str] = field(default_factory=list)
-    created_at: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
@@ -81,7 +70,6 @@ class ReportSection:
     content: str
     sources: List[str]
     order: int
-    subsections: List['ReportSection'] = field(default_factory=list)
 
 
 @dataclass
@@ -105,7 +93,6 @@ class ResearchState:
     start_time: datetime = field(default_factory=datetime.now)
     end_time: Optional[datetime] = None
     total_searches: int = 0
-    total_tokens_used: int = 0
     
     # Report
     report_sections: List[ReportSection] = field(default_factory=list)
@@ -132,7 +119,6 @@ class ResearchState:
         question = self.get_question_by_id(question_id)
         if question:
             question.status = QuestionStatus.COMPLETED
-            question.completed_at = datetime.now()
             self.completed_questions.add(question_id)
             if question_id in self.question_queue:
                 self.question_queue.remove(question_id)

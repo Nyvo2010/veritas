@@ -4,7 +4,6 @@ Coordinates all agents in an iterative research loop
 """
 
 import asyncio
-import nest_asyncio
 from typing import Dict, Optional
 from datetime import datetime
 import logging
@@ -484,34 +483,6 @@ class DeepResearchAgent:
 
             # Re-raise the exception
             raise
-
-    def research_sync(
-        self,
-        query: str,
-        max_iterations: int = MAX_RESEARCH_ITERATIONS,
-        verbose: bool = True
-    ) -> ResearchState:
-        """
-        Synchronous wrapper for research method
-
-        Args:
-            query: The research query
-            max_iterations: Maximum research iterations
-            verbose: Whether to print progress
-
-        Returns:
-            ResearchState with all findings and final report
-        """
-        try:
-            # Check if there's already a running event loop
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No event loop running, create and run one
-            return asyncio.run(self.research(query, max_iterations, verbose))
-        else:
-            # Event loop already running, schedule the coroutine
-            nest_asyncio.apply()
-            return asyncio.run(self.research(query, max_iterations, verbose))
 
     def save_report(self, state: ResearchState, filename: str = None) -> str:
         """

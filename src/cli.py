@@ -96,7 +96,7 @@ def keys_menu(console: Console, settings: dict) -> dict:
         clear_screen()
         screens.print_header(console, "Settings - API Keys")
         screens.kv_panel(console, "Keys (secrets stay in your settings file)", [
-            ("[1] LLM key", mask_key(settings.get("llm_api_key", "") or settings.get("nvidia_api_key", ""))),
+            ("[1] LLM key", mask_key(settings.get("llm_api_key", ""))),
             ("[2] Endpoint", str(settings.get("llm_base_url", ""))),
             ("[3] Model", str(settings.get("llm_model", ""))),
             ("[4] Tavily", mask_key(settings.get("tavily_api_key", ""))),
@@ -202,7 +202,7 @@ def settings_menu(console: Console, settings: dict) -> dict:
             ("File", settings_path()),
             ("Theme", str(settings.get("theme", ""))),
             ("Reports", reports_dir(settings)),
-            ("LLM key", mask_key(settings.get("llm_api_key", "") or settings.get("nvidia_api_key", ""))),
+            ("LLM key", mask_key(settings.get("llm_api_key", ""))),
             ("Endpoint", str(settings.get("llm_base_url", ""))),
             ("Model", str(settings.get("llm_model", ""))),
             ("Tavily key", mask_key(settings.get("tavily_api_key", ""))),
@@ -234,7 +234,7 @@ def view_config(console: Console, agent: DeepResearchAgent, settings: dict):
         ("Theme", str(settings.get("theme", ""))),
         ("Reports folder", reports_dir(settings)),
         ("Settings file", settings_path()),
-        ("LLM key", mask_key(settings.get("llm_api_key", "") or settings.get("nvidia_api_key", ""))),
+        ("LLM key", mask_key(settings.get("llm_api_key", ""))),
         ("Tavily key", mask_key(settings.get("tavily_api_key", ""))),
         ("Default iterations", str(settings.get("max_iterations", 10))),
     ])
@@ -377,18 +377,19 @@ def classic_main():
 
     try:
         agent = build_agent(settings)
-        # Fail fast if no keys resolve from env or settings.
-        from settings import resolve_api_keys
-        nvidia_key, tavily_key, _ = resolve_api_keys(settings)
-        if not nvidia_key or not tavily_key:
-            raise ValueError("Missing API keys")
+        # Fail fast if the provider or the search key does not resolve.
+        from settings import resolve_api_keys, resolve_llm
+        llm = resolve_llm(settings)
+        _, tavily_key, _ = resolve_api_keys(settings)
+        if not (llm["api_key"] and llm["base_url"] and llm["model"]) or not tavily_key:
+            raise ValueError("Missing AI provider or Tavily credentials")
     except Exception as e:
         clear_screen()
         screens.print_header(console)
         screens.print_panel(
             console,
-            "Could not initialize the agent. Add your API keys under Settings (option 2), "
-            "via environment variables, or in your .env file.\n"
+            "Could not initialize the agent. Add your endpoint, model, and API keys "
+            "under Settings (option 2), via environment variables, or in your .env file.\n"
             f"Details: {e}",
             "Initialization Error",
             style=theme.ERROR,

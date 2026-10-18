@@ -74,7 +74,7 @@ class SynthesisAgent:
         
         # Suppress LLM analysis message
         
-        # Use NVIDIA NIM to analyze with ReAct reasoning
+        # Use the configured LLM to analyze with ReAct reasoning
         analysis = self.llm.analyze_search_results(
             question=question.question,
             search_results=results_data,
@@ -91,13 +91,11 @@ class SynthesisAgent:
                 confidence=analysis.get('confidence', 0.5),
                 question_id=question.id,
                 contradictions=analysis.get('contradictions', []),
-                supporting_facts=[r.content for r in search_results[:3]]
             )
             state.findings.append(finding)
             
             # Update question
             question.answer = analysis['answer']
-            question.sources = [r.url for r in search_results[:10]]
             
             # Show the answer, clipped: the panel keeps one line per entry.
             if ui_manager:
