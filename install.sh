@@ -4,11 +4,13 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Nyvo2010/veritas/main/install.sh | sh
 #
+# Prefer pipx? `pipx install veritas-cli` (see the README).
+#
 # From a checkout, just run ./install.sh (it installs that working tree).
 #
 # Environment overrides:
 #   VERITAS_REPO      GitHub repo (default: Nyvo2010/veritas)
-#   VERITAS_REF       branch/tag (default: main)
+#   VERITAS_REF       branch, tag or commit (default: main); e.g. v1.0.0
 #   VERITAS_HOME      virtualenv location (default: ~/.local/share/veritas)
 #   VERITAS_BIN_DIR   where the `veritas` command is linked (default: ~/.local/bin)
 #   VERITAS_FROM_SRC  install from this local directory instead of downloading
@@ -60,7 +62,7 @@ else
     TMP="$(mktemp -d "${TMPDIR:-/tmp}/veritas.XXXXXX")"
     CLEANUP="$TMP"
     trap '[ -n "$CLEANUP" ] && rm -rf "$CLEANUP"' EXIT INT TERM
-    URL="https://github.com/$REPO/archive/refs/heads/$REF.tar.gz"
+    URL="https://github.com/$REPO/archive/$REF.tar.gz"
     info "Downloading: $URL"
     curl -fsSL "$URL" -o "$TMP/src.tar.gz" || die "Download failed. Check VERITAS_REPO/VERITAS_REF."
     tar -xzf "$TMP/src.tar.gz" -C "$TMP" || die "Could not unpack the archive."

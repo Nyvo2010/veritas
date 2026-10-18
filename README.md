@@ -21,29 +21,32 @@ model list is auto-detected from the endpoint's `/models`.
 
 ## Install
 
-Requires Python 3.10+ (3.12/3.13 for the TUI).
+Requires Python 3.10+ (3.12/3.13 for the full TUI).
 
-**One-line install** — builds an isolated virtualenv and puts the `veritas`
-command on your PATH:
+**pipx** (recommended) — installs Veritas in its own environment and puts
+`veritas` on your PATH, on macOS, Linux and Windows. `tui` is the full
+keyboard-driven interface (prebuilt opentui wheels for CPython 3.12/3.13);
+omit it for the classic Rich CLI:
+
+```bash
+pipx install "veritas-cli[tui]"   # full TUI
+# or
+pipx install veritas-cli          # classic Rich CLI
+veritas
+```
+
+No pipx yet? `python3 -m pip install --user pipx && pipx ensurepath` (or
+`brew install pipx`, `apt install pipx`, `winget install pipx`).
+
+**One-line install** (no pipx required) — builds an isolated virtualenv and
+links the command:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Nyvo2010/veritas/main/install.sh | sh
 veritas
 ```
 
-**With pip** — `tui` is the full keyboard-driven interface (prebuilt opentui
-wheels for CPython 3.12/3.13 on macOS, Linux, Windows). Without it you get the
-classic Rich CLI with the same features:
-
-```bash
-pip install "veritas[tui]"   # full TUI
-# or
-pip install veritas          # classic Rich CLI
-veritas
-```
-
-The `veritas` command installs to your Python scripts directory (on Linux/macOS
-usually `~/.local/bin`, which has to be on `PATH`).
+Check the installed version with `veritas --version`.
 
 **From source**:
 
