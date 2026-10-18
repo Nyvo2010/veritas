@@ -31,8 +31,8 @@ import tty
 
 _TRUECOLOR_ENV = ("truecolor", "24bit")
 
-# ESC[ 38;2;r;g;b m  and  ESC[ 48;2;r;g;b m  (foreground / background runs)
-_SGR_TRUECOLOR = re.compile(rb"\x1b\[(38|48);2;(\d{1,3});(\d{1,3});(\d{1,3})m")
+# Any SGR sequence: ESC [ params m
+_SGR = re.compile(rb"\x1b\[([0-9;]*)m")
 
 _PROXY_ENV = "VERITAS_COLOR_PROXY"
 _READ_CHUNK = 65536
@@ -74,25 +74,98 @@ def _rgb_to_256(r: int, g: int, b: int) -> int:
     return cube_idx
 
 
-def _downconvert(match: re.Match[bytes]) -> bytes:
-    slot, r, g, b = match.group(1), match.group(2), match.group(3), match.group(4)
-    code = _rgb_to_256(int(r), int(g), int(b))
-    return b"\x1b[" + slot + b";5;" + str(code).encode() + b"m"
+def _convert_sgr_params(params: bytes) -> bytes:
+    """Rewrite 38;2;r;g;b / 48;2;r;g;b groups inside one SGR parameter list.
+
+    A positional regex misses truecolor sub-parameters that share an SGR with
+    other attributes ("1;38;2;r;g;b") or with each other
+    ("38;2;r;g;b;48;2;r;g;b") — those leaks are what makes the colour bug
+    intermittent, so we walk the parameters instead.
+    """
+    tokens = params.split(b";")
+    out: list = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        token = tokens[i]
+        if token in (b"38", b"48") and i + 4 < n and tokens[i + 1] == b"2":
+            try:
+                r, g, b = int(tokens[i + 2]), int(tokens[i + 3]), int(tokens[i + 4])
+            except ValueError:
+                out.append(token)
+                i += 1
+                continue
+            out.append(token + b";5;" + str(_rgb_to_256(r, g, b)).encode())
+            i += 5
+        else:
+            out.append(token)
+            i += 1
+    return b";".join(out)
+
+
+def _rewrite_sgr(match: re.Match[bytes]) -> bytes:
+    return b"\x1b[" + _convert_sgr_params(match.group(1)) + b"m"
+
+
+def _safe_split(data: bytes) -> int:
+    """Index where a possibly-incomplete trailing escape begins.
+
+    A read can end in the middle of an escape sequence. Emitting that partial
+    tail makes the terminal either print it as literal text or misparse the
+    colour run, so the caller buffers from here and prepends it to the next
+    read. Everything before the returned index is a complete sequence (or
+    plain text) and safe to rewrite and emit.
+    """
+    i = 0
+    n = len(data)
+    safe = 0
+    while i < n:
+        if data[i] != 0x1B:
+            i += 1
+            safe = i
+            continue
+        if i + 1 >= n:
+            return i                                   # lone trailing ESC
+        kind = data[i + 1]
+        if kind == ord("["):                           # CSI: ends at 0x40-0x7E
+            j = i + 2
+            while j < n and not (0x40 <= data[j] <= 0x7E):
+                j += 1
+            if j >= n:
+                return i
+            i = safe = j + 1
+        elif kind == ord("]"):                         # OSC: ends at BEL or ST
+            j = i + 2
+            end = -1
+            while j < n:
+                if data[j] == 0x07:
+                    end = j + 1
+                    break
+                if data[j] == 0x1B and j + 1 < n and data[j + 1] == ord("\\"):
+                    end = j + 2
+                    break
+                j += 1
+            if end == -1:
+                return i
+            i = safe = end
+        elif kind in b"()*+#%":                        # designator escapes: 3 bytes
+            if i + 2 >= n:
+                return i
+            i = safe = i + 3
+        else:                                          # other two-byte escape
+            i = safe = i + 2
+    return safe
 
 
 def rewrite_truecolor(data: bytes) -> tuple[bytes, bytes]:
-    """Rewrite complete 24-bit SGR runs. Returns (out, tail) where tail is a
+    """Rewrite 24-bit SGR runs. Returns (out, tail) where tail is a
     possibly-incomplete trailing escape sequence to resubmit with the next
     chunk; pass tail back in with the following data."""
-    buf = data
-    out = _SGR_TRUECOLOR.sub(_downconvert, buf) if b";2;" in buf else buf
-    tail = b""
-    idx = out.rfind(b"\x1b[")
-    if idx != -1:
-        rest = out[idx:]
-        if not re.search(rb"\x1b\[[0-9;]*m", rest):
-            tail = rest
-            out = out[:idx]
+    split = _safe_split(data)
+    out = data[:split]
+    tail = data[split:]
+    if b";2;" in out:
+        out = _SGR.sub(_rewrite_sgr, out)
     return out, tail
 
 
