@@ -4,11 +4,13 @@ name: release
 # sdist + wheel and publish a GitHub Release with them attached.
 #
 # PyPI publishing is gated behind the repository variable PYPI_PUBLISH so a tag
-# never fails before Trusted Publishing is configured. To enable it:
-#   1. PyPI → your account → Publishing → add a pending publisher for
-#      veritas-cli pointing at this repo, workflow "release.yml", environment
-#      "pypi".
-#   2. GitHub → Settings → Variables → Actions → add PYPI_PUBLISH = true.
+# never fails before publishing is configured. To enable it, set
+# PYPI_PUBLISH = true (Settings → Secrets and variables → Actions → Variables),
+# then do EITHER of:
+#   - Trusted Publishing (no secret): on PyPI add a pending publisher for
+#     veritas-cli with owner Nyvo2010, repo veritas, workflow release.yml,
+#     environment pypi; or
+#   - a classic token: add a repository secret PYPI_API_TOKEN.
 on:
   push:
     tags: ["v*"]
@@ -24,12 +26,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
       - run: python -m pip install --upgrade build
       - run: python -m build
       - name: Check the wheel installs and the command runs
         run: |
           python -m venv /tmp/smoke
+          /tmp/smoke/bin/python -m pip install --quiet --upgrade pip
           /tmp/smoke/bin/python -m pip install --quiet dist/*.whl
           /tmp/smoke/bin/veritas --version
       - uses: actions/upload-artifact@v4
@@ -47,7 +50,9 @@ jobs:
     needs: build
     if: ${{ vars.PYPI_PUBLISH == 'true' }}
     runs-on: ubuntu-latest
-    environment: pypi
+    environment:
+      name: pypi
+      url: https://pypi.org/p/veritas-cli
     permissions:
       id-token: write
     steps:
@@ -55,4 +60,7 @@ jobs:
         with:
           name: dist
           path: dist/
+      # Empty password => Trusted Publishing via OIDC; a token secret overrides.
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}

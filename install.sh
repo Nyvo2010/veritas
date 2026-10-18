@@ -27,9 +27,9 @@ info() { printf '  %s\n' "$1"; }
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
 find_python() {
-    for candidate in python3 python3.13 python3.12 python3.11 python3.10 python; do
+    for candidate in python3 python3.13 python3.12 python; do
         command -v "$candidate" >/dev/null 2>&1 || continue
-        if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 10) else 1)' 2>/dev/null; then
+        if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 12) else 1)' 2>/dev/null; then
             printf '%s' "$candidate"
             return 0
         fi
@@ -41,7 +41,7 @@ printf '\nVeritas installer\n\n'
 
 # 1. A suitable Python.
 PYTHON="$(find_python || true)"
-[ -n "$PYTHON" ] || die "Python 3.10+ is required but was not found on PATH."
+[ -n "$PYTHON" ] || die "Python 3.12+ is required but was not found on PATH."
 info "Python: $($PYTHON --version 2>&1) ($(command -v "$PYTHON"))"
 
 # 2. Where the source comes from: a local checkout, or a downloaded tarball.
@@ -78,14 +78,11 @@ if [ ! -x "$VENV/bin/python" ]; then
 fi
 "$VENV/bin/python" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
 
-# 4. Install. Try the full TUI first; fall back to the Rich CLI when no
-#    prebuilt opentui wheel exists for this Python.
-if "$VENV/bin/python" -m pip install --quiet "${SOURCE}[tui]" 2>/dev/null; then
-    info "Installed with the full TUI (opentui)."
-elif "$VENV/bin/python" -m pip install --quiet "$SOURCE"; then
-    info "Installed the Rich CLI (no opentui wheel for this Python)."
+# 4. Install.
+if "$VENV/bin/python" -m pip install --quiet "$SOURCE"; then
+    info "Installed."
 else
-    die "Installation failed. Re-run with the log visible: $VENV/bin/python -m pip install \"${SOURCE}[tui]\""
+    die "Installation failed. Re-run with the log visible: $VENV/bin/python -m pip install \"$SOURCE\""
 fi
 
 # 5. Put `veritas` on PATH.

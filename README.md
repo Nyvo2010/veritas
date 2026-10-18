@@ -3,7 +3,7 @@
 <p align="center">
   <a href="https://github.com/Nyvo2010/veritas/actions/workflows/tests.yml"><img src="https://github.com/Nyvo2010/veritas/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license: MIT"></a>
-  <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="python 3.10+">
+  <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="python 3.12+">
 </p>
 
 <p align="center"><sub>Made by Nyvø w/ love · Powered by Tavily</sub></p>
@@ -21,17 +21,15 @@ model list is auto-detected from the endpoint's `/models`.
 
 ## Install
 
-Requires Python 3.10+ (3.12/3.13 for the full TUI).
+Requires Python 3.12+. The full TUI uses opentui, whose wheels cover CPython
+3.12/3.13; on other Python versions Veritas runs its Rich CLI, which is the
+same program with the same features. Either way it is one install command.
 
 **pipx** (recommended) — installs Veritas in its own environment and puts
-`veritas` on your PATH, on macOS, Linux and Windows. `tui` is the full
-keyboard-driven interface (prebuilt opentui wheels for CPython 3.12/3.13);
-omit it for the classic Rich CLI:
+`veritas` on your PATH, on macOS, Linux and Windows:
 
 ```bash
-pipx install "veritas-cli[tui]"   # full TUI
-# or
-pipx install veritas-cli          # classic Rich CLI
+pipx install veritas-cli
 veritas
 ```
 
@@ -54,7 +52,7 @@ Check the installed version with `veritas --version`.
 git clone https://github.com/Nyvo2010/veritas.git
 cd veritas
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[tui]"
+pip install -e .
 veritas
 ```
 
@@ -164,7 +162,7 @@ and is never uploaded.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[tui]"          # omit [tui] to test the Rich CLI fallback
+pip install -e .                  # editable install of the app
 python -m unittest discover -s tests
 ```
 
@@ -182,4 +180,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, and
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Release notes live in [CHANGELOG.md](CHANGELOG.md).
