@@ -2,8 +2,23 @@
 
 Notable changes per release. This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.1] - 2026-10-19
 
+- The progress bar is a two-row braille wave: a rippling filled band with a
+  rising meniscus and a denser field of drifting particles, replacing the
+  single hairline row.
+- The bibliography now records how far each source actually got — cited in the
+  report, analyzed but unused, or collected only — and the header reports the
+  number of distinct sources cited next to the citation count. A long source
+  list no longer implies grounding it never provided.
+- The executive summary carries `[Source N]` citations, limited to numbers the
+  sections already cited, so its claims are traceable without letting it
+  introduce evidence of its own.
+- Section prompts spread citations across the distinct sources that support
+  each point instead of leaning on one or two.
+- High decomposition priority no longer forces Tavily's `advanced` depth (it
+  made every search advanced); the planner's explicit `search_depth` request
+  is now honoured, and the cheap depth stays the default.
 - The analysis model now receives a quality-ranked, domain-diverse subset of
   the usable search results (up to 2,000 characters each) instead of the first
   ten in engine order. Every usable source still appears in the bibliography.
@@ -16,8 +31,8 @@ Notable changes per release. This project follows [Semantic Versioning](https://
   answered from failed questions instead of counting processed searches as
   answers.
 - Searches default to Tavily's cheap `basic` depth and escalate only for
-  high-priority, time-sensitive, finance, long, or re-researched questions, so
-  easy questions no longer pay the advanced rate.
+  planner-requested, time-sensitive, finance, long, or re-researched
+  questions, so easy questions no longer pay the advanced rate.
 - Site categories match on a host boundary: `netflix.com` is no longer treated
   as social because `x.com` is a substring, and long paywalled or blocked pages
   no longer pass source hygiene on length alone.

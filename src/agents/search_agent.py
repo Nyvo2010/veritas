@@ -219,10 +219,13 @@ class SearchAgent:
         Choose the cheapest search depth that can still answer the question.
 
         Tavily charges twice as much for ``advanced``, so it is reserved for
-        questions that need it: high priority, explicit freshness or finance
-        questions, long multi-clause questions, and a re-search after a
-        low-confidence answer. A question searched for the first time has no
-        previous confidence, which must not be mistaken for zero.
+        questions that need it: the planner's explicit request, explicit
+        freshness or finance questions, long multi-clause questions, and a
+        re-search after a low-confidence answer. Priority only orders the
+        queue; decomposition models rate most questions highly, so treating a
+        high priority as "needs advanced" made every search advanced. A
+        question searched for the first time has no previous confidence, which
+        must not be mistaken for zero.
 
         Args:
             question: The question being searched
@@ -233,7 +236,7 @@ class SearchAgent:
         Returns:
             "basic" or "advanced"
         """
-        if question.priority >= 8:
+        if str(getattr(question, "search_depth", "") or "").lower() == "advanced":
             return "advanced"
 
         if previous_confidence is not None and previous_confidence < 0.5:

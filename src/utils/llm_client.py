@@ -684,6 +684,11 @@ Consider:
 - What perspectives should be explored WITHIN THIS TOPIC?
 - What data or evidence is required FOR THIS SPECIFIC SUBJECT?
 
+SEARCH DEPTH: use "basic" for most questions. Choose "advanced" only when
+the question needs very recent information, financial data, or spans several
+clauses that one snippet cannot answer. Priority orders the research queue;
+it is not a reason to choose "advanced".
+
 Return a JSON with this structure:
 {
     "reasoning": "Your analysis of the query",
@@ -945,7 +950,12 @@ STRUCTURE:
 Prioritise depth over breadth: reveal something specific and well-evidenced,
 not generic observations. Cite the evidence above as [Source N]. Use only the
 numbers shown in the evidence labels; when a finding carries several numbers,
-cite only the ones that actually support that sentence."""
+cite only the ones that actually support that sentence.
+
+SOURCE COVERAGE: the labels offer several sources. Spread the citations over
+the distinct sources that genuinely support each point instead of leaning on
+one or two, and do not cite the same source more than a few times in this
+section. A citation is not decoration: attach it to the sentence it supports."""
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -975,20 +985,34 @@ cite only the ones that actually support that sentence."""
         self,
         main_query: str,
         all_sections: List[str],
-        key_findings: List[str]
+        key_findings: List[str],
+        source_numbers: List[int] = None,
     ) -> str:
         """Executive summary with the primary model, falling back once on failure."""
         return self._with_fallback(
-            self._generate_executive_summary, main_query, all_sections, key_findings
+            self._generate_executive_summary, main_query, all_sections,
+            key_findings, source_numbers,
         )
 
     def _generate_executive_summary(
         self,
         main_query: str,
         all_sections: List[str],
-        key_findings: List[str]
+        key_findings: List[str],
+        source_numbers: List[int] = None,
     ) -> str:
-        """Generate executive summary after all sections are complete"""
+        """Generate executive summary after all sections are complete."""
+        numbers = [int(number) for number in (source_numbers or [])]
+        if numbers:
+            citation_rule = (
+                "Cite each concrete claim as [Source N], drawing only on these "
+                "numbers already cited by the sections: "
+                + ", ".join(str(number) for number in numbers)
+                + ". Never invent a number or cite a source outside that list."
+            )
+        else:
+            citation_rule = "Omit [Source N] markers: no source was cited by the sections."
+
         system_prompt = f"""You are an expert analyst writing the executive summary of a research report.
 
 Write 600-900 words that:
@@ -999,8 +1023,7 @@ Write 600-900 words that:
 
         {REPORT_STYLE_GUIDE}
 
-        Unlike the sections, this summary has no numbered source list, so omit
-        the [Source N] markers here — the sections carry the citations.
+        {citation_rule}
 
         The summary must stand alone: do not refer to "the report", "the sections
         above", or the research process itself."""

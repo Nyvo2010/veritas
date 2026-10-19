@@ -78,11 +78,20 @@ class QueryAnalyzerAgent:
             question_text = str(sq_data.get("question") or "").strip()
             if not question_text:
                 continue
+            requested_depth = str(
+                sq_data.get("search_depth") or ""
+            ).strip().lower()
             sub_q = SubQuestion(
                 id=str(uuid.uuid4()),
                 question=question_text,
                 priority=as_int(sq_data.get("priority"), default=5, low=0, high=10),
                 depth=0,  # Top-level questions
+                # Only the two depths Tavily accepts; anything else is left to
+                # the deterministic policy in SearchAgent.
+                search_depth=(
+                    requested_depth
+                    if requested_depth in ("basic", "advanced") else None
+                ),
                 status=QuestionStatus.PENDING,
             )
             sub_questions.append(sub_q)

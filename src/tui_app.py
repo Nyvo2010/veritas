@@ -1018,7 +1018,7 @@ def screen_sources() -> Box:
 
 
 def screen_run() -> Box:
-    """Live run screen: context, the activity log, and the braille bar.
+    """Live run screen: context, the activity log, and the two-row wave bar.
 
     The log block is padded to a fixed number of rows so the screen never
     grows or shrinks while events stream in.
@@ -1031,10 +1031,16 @@ def screen_run() -> Box:
             gap(),
             *log_block(activity_rows()),
             gap(),
-            Row(
-                Text(lambda: progress_parts()[0], fg=accent()),
-                Text(lambda: progress_parts()[1], fg=TERTIARY),
-                Text(lambda: progress_parts()[2], fg=SECONDARY, bold=True),
+            Box(
+                Row(
+                    Text(lambda: progress_parts()[0], fg=accent()),
+                    Text(lambda: progress_parts()[1], fg=TERTIARY),
+                    Text(lambda: progress_parts()[2], fg=SECONDARY, bold=True),
+                ),
+                Row(
+                    Text(lambda: progress_parts()[3], fg=accent()),
+                    Text(lambda: progress_parts()[4], fg=TERTIARY),
+                ),
             ),
             Text(lambda: clock_line(), fg=SECONDARY),
             Text(lambda: timing_line(), fg=TERTIARY),
@@ -1731,8 +1737,8 @@ def bar_width() -> int:
 
 
 def particles_for(width: int) -> int:
-    """Scale the particle count with the bar so wide bars never look empty."""
-    return max(3, min(14, width // 11))
+    """Dense particle field: roughly one drifting dot per two cells."""
+    return max(10, min(48, width // 2))
 
 
 def activity_rows() -> int:
@@ -1742,10 +1748,10 @@ def activity_rows() -> int:
     title, query and phase lines, the bar and its two stat lines, the gaps,
     and the hint), so the log takes what is left.
     """
-    return max(4, term_height() - 14 - MARGIN_TOP)
+    return max(4, term_height() - 15 - MARGIN_TOP)
 
 
-_bar_frame = {"key": None, "parts": ("", "", "")}
+_bar_frame = {"key": None, "parts": ("", "", "", "", "")}
 
 
 def progress_parts() -> tuple:
@@ -1762,13 +1768,14 @@ def progress_parts() -> tuple:
     key = (round(ratio, 4), anim_sig(), width)
     if _bar_frame["key"] == key:
         return _bar_frame["parts"]
-    filled, track = theme.braille_bar(
+    (fill_top, fill_bottom), (track_top, track_bottom) = theme.braille_wave(
         ratio, width, anim_sig() * ANIM_TRAVEL, particles_for(width)
     )
     percent = f"{ratio * 100:.0f}%"
-    track = track + " " * max(0, SUFFIX_WIDTH - len(percent))
+    track_top = track_top + " " * max(0, SUFFIX_WIDTH - len(percent))
+    track_bottom = track_bottom + " " * SUFFIX_WIDTH
     _bar_frame["key"] = key
-    _bar_frame["parts"] = (filled, track, percent)
+    _bar_frame["parts"] = (fill_top, track_top, percent, fill_bottom, track_bottom)
     return _bar_frame["parts"]
 
 

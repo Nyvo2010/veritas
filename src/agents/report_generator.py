@@ -100,11 +100,13 @@ class ReportGeneratorAgent:
         if ui_manager:
             ui_manager.set_status("Writing executive summary...")
         summary_started = time.perf_counter()
-        executive_summary = await self._generate_executive_summary(state, sections)
-        # The summary has no evidence list of its own, so only numbers that a
-        # section actually cited survive: enough to keep its claims traceable,
-        # without letting it invent a source the body never used.
+        # The summary sees no evidence list of its own, so it may cite only
+        # numbers a section already grounded: enough to keep its claims
+        # traceable, without letting it invent a source the body never used.
         summary_numbers = cited_numbers("\n".join(s.content for s in sections))
+        executive_summary = await self._generate_executive_summary(
+            state, sections, summary_numbers
+        )
         executive_summary = normalize_citations(
             executive_summary,
             valid_numbers=set(source_numbers.values()),
@@ -117,8 +119,15 @@ class ReportGeneratorAgent:
         # Step 4: Generate uncertainties and gaps section
         gaps_section = self._generate_gaps_section(state)
 
+        # Which sources the body actually cites. Recomputed here (rather than
+        # inside the sources section) because the bibliography has to say what
+        # the text did, not what the search engine returned.
+        cited = cited_numbers("\n".join(
+            [executive_summary, gaps_section] + [s.content for s in sections]
+        ))
+
         # Step 5: Generate sources section
-        sources_section = self._generate_sources_section(state, source_entries)
+        sources_section = self._generate_sources_section(state, source_entries, cited)
 
         # Step 6: Assemble final report
         final_report = self._assemble_report(
@@ -315,7 +324,8 @@ class ReportGeneratorAgent:
     async def _generate_executive_summary(
         self,
         state: ResearchState,
-        sections: List[ReportSection]
+        sections: List[ReportSection],
+        source_numbers: set = None,
     ) -> str:
         """
         Generate executive summary after all sections are complete
@@ -332,6 +342,7 @@ class ReportGeneratorAgent:
             state.main_query,
             section_contents,
             key_findings,
+            source_numbers,
         )
 
         return summary
@@ -448,13 +459,23 @@ class ReportGeneratorAgent:
 
         return content
     
-    def _generate_sources_section(self, state: ResearchState, entries: list = None) -> str:
+    def _generate_sources_section(
+        self,
+        state: ResearchState,
+        entries: list = None,
+        cited: set = None,
+    ) -> str:
         """Bibliography in the same numbering used by inline citations.
+
+        Every entry is labelled with how far it actually got: cited in the
+        body, analyzed but unused, or only collected. Without that, a long
+        bibliography reads as evidence it never was.
 
         No heading here: _assemble_report writes the "Sources" heading.
         """
         if entries is None:
             _, entries = build_source_registry(state.search_results)
+        cited = cited or set()
 
         if not entries:
             return "No sources were collected.\n"
@@ -471,6 +492,10 @@ class ReportGeneratorAgent:
                 f"   {confidence} · evidence quality {source.quality:.2f} · "
                 f"search relevance {source.score:.2f}"
             )
+            if not source.analyzed:
+                lines.append("   Collected only — not analyzed")
+            elif source.number not in cited:
+                lines.append("   Analyzed — not cited in this report")
             lines.append("")
         return "\n".join(lines).rstrip() + "\n"
     
@@ -493,10 +518,11 @@ class ReportGeneratorAgent:
             [executive_summary, gaps_section]
             + [section.content for section in ordered_sections]
         )
+        cited = cited_numbers(body_for_count)
         meta = "  ·  ".join([
             f"Model: `{model}`",
             f"Iterations: {state.iteration_count}",
-            f"Unique sources: {len(source_entries or [])}",
+            f"Unique sources: {len(source_entries or [])} ({len(cited)} cited)",
             f"Citations: {citation_count(body_for_count)}",
             f"Generated: {generated}",
         ])

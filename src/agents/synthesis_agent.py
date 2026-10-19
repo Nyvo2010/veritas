@@ -85,6 +85,13 @@ class SynthesisAgent:
         
         # Suppress detailed analysis output
         
+        # Anything handed to the analysis model counts as analyzed, even when
+        # this pass produces no finding. The bibliography uses the flag to
+        # stop presenting untouched search hits as evidence.
+        for result in search_results:
+            if hasattr(result, "analyzed"):
+                result.analyzed = True
+
         # Extract and store knowledge finding. Model output is untrusted: a
         # field requested as a list can arrive as one string, which would
         # otherwise be iterated character by character.
