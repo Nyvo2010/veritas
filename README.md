@@ -169,7 +169,8 @@ python -m unittest discover -s tests
 The suite runs with no API keys: it covers report writing, the UI primitives,
 and — when opentui is importable — a headless render of every screen.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, and
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow,
+[RELEASING.md](RELEASING.md) for cutting a release, and
 [SECURITY.md](SECURITY.md) for how to report a vulnerability.
 
 ## Roadmap
