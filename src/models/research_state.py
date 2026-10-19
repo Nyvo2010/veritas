@@ -42,6 +42,8 @@ class SearchResult:
     full_content: Optional[str] = None  # Full webpage content
     category: Optional[str] = None  # social, educational, etc.
     question_id: Optional[str] = None
+    quality: float = 0.0  # 0-1 evidence quality (see utils.sources)
+    published_date: Optional[str] = None  # ISO-ish date when the source reports one
 
 
 @dataclass
@@ -98,6 +100,10 @@ class ResearchState:
     report_sections: List[ReportSection] = field(default_factory=list)
     final_report: Optional[str] = None
     
+    # Cross-question meta-analysis (consensus, contradictions, reliability).
+    # Kept so the report can use it instead of discarding a paid-for call.
+    cross_reference: Dict = field(default_factory=dict)
+
     # Research reasoning steps for debugging/transparency
     reasoning_steps: List[str] = field(default_factory=list)
     
@@ -143,6 +149,19 @@ class ResearchState:
             return question
         return None
     
+    def answered_questions(self) -> List[SubQuestion]:
+        """Questions that produced an answer.
+
+        ``completed_questions`` records questions that were *processed* and
+        includes searches that came back empty, so reporting must use the
+        status instead.
+        """
+        return [q for q in self.questions if q.status is QuestionStatus.COMPLETED]
+
+    def failed_questions(self) -> List[SubQuestion]:
+        """Questions whose search produced nothing usable."""
+        return [q for q in self.questions if q.status is QuestionStatus.FAILED]
+
     def get_findings_for_question(self, question_id: str) -> List[KnowledgeFinding]:
         """Get all findings related to a specific question"""
         return [f for f in self.findings if f.question_id == question_id]

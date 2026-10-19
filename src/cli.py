@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '.'))
 from rich.console import Console
 from rich.prompt import Prompt
 
-from utils import filelog
+from utils import desktop, filelog
 
 from ui import theme, screens
 from settings import (
@@ -246,6 +246,28 @@ def view_config(console: Console, agent: DeepResearchAgent, settings: dict):
 # Research flow
 # ---------------------------------------------------------------------------
 
+def report_actions(console: Console, path: str) -> None:
+    """Open or reveal a saved report without leaving the CLI."""
+    while True:
+        action = Prompt.ask(
+            f"[{theme.PRIMARY}][o]pen report · [r]eveal in file manager · Enter for menu[/{theme.PRIMARY}]",
+            default="", show_default=False,
+        ).strip().lower()
+        if action == "":
+            return
+        try:
+            if action in ("o", "open"):
+                desktop.open_in_default_app(path)
+                screens.print_panel(console, f"Opened {path}", "Report", style=theme.SUCCESS)
+            elif action in ("r", "reveal"):
+                desktop.reveal_in_file_manager(path)
+                screens.print_panel(console, f"Showing {path}", "Report", style=theme.SUCCESS)
+            else:
+                continue
+        except Exception as e:
+            screens.print_panel(console, f"Could not open the report: {e}", "Error", style=theme.ERROR)
+
+
 def start_research(console: Console, agent: DeepResearchAgent, settings: dict):
     default_iter = int(settings.get("max_iterations", 10))
 
@@ -327,7 +349,11 @@ def start_research(console: Console, agent: DeepResearchAgent, settings: dict):
 
     # Run (the live renderer owns the screen from here; no clearing mid-run)
     try:
-        state = asyncio.run(agent.research(query, max_iterations=max_iter))
+        state = asyncio.run(agent.research(
+            query,
+            max_iterations=max_iter,
+            max_results=settings.get("max_search_results"),
+        ))
     except KeyboardInterrupt:
         console.print()
         screens.print_panel(console, "Research stopped by user.", "Interrupted", style=theme.WARNING)
@@ -341,6 +367,7 @@ def start_research(console: Console, agent: DeepResearchAgent, settings: dict):
         if partial:
             screens.print_panel(console, f"Findings written to {partial}", "Partial Report",
                                 style=theme.WARNING)
+            report_actions(console, partial)
         pause(console)
         return
 
@@ -349,6 +376,7 @@ def start_research(console: Console, agent: DeepResearchAgent, settings: dict):
     if filename:
         shown = filename if len(filename) <= 80 else "..." + filename[-77:]
         screens.print_panel(console, f"Saved to {shown}", "Report Saved", style=theme.SUCCESS)
+        report_actions(console, filename)
     else:
         reason = agent.save_error or "unknown reason"
         screens.print_panel(console, f"Report could not be saved: {reason}", "Save Failed",

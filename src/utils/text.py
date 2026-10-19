@@ -21,6 +21,59 @@ def strip_markup(text: str) -> str:
     return " ".join(_MARKUP_RE.sub("", text or "").split())
 
 
+def as_int(value: object, default: int = 0, low: int = None, high: int = None) -> int:
+    """Coerce a model-supplied number, clamping it to a sane range."""
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    if low is not None:
+        number = max(low, number)
+    if high is not None:
+        number = min(high, number)
+    return number
+
+
+def as_bool(value: object, default: bool = False) -> bool:
+    """Read a model-supplied boolean, including the string forms models emit.
+
+    ``"false"`` is truthy as a Python string, which would otherwise start an
+    unnecessary follow-up research round.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "yes", "y", "1"}:
+            return True
+        if text in {"false", "no", "n", "0", ""}:
+            return False
+        return default
+    return bool(value)
+
+
+def string_list(value: object, limit: int = 0) -> list:
+    """Coerce a model-supplied field to a list of non-empty strings.
+
+    A bare string becomes one item, not one item per character: iterating a
+    string where a list was requested would otherwise turn ``"false"`` into
+    five follow-up questions.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, (list, tuple, set)):
+        items = list(value)
+    else:
+        items = [value]
+    cleaned = [str(item).strip() for item in items if item is not None]
+    cleaned = [item for item in cleaned if item]
+    return cleaned[:limit] if limit else cleaned
+
+
 def classify_message(message: str) -> str:
     """Guess a log level for a message written for the old console UI.
 

@@ -142,6 +142,16 @@ partial report from the findings collected so far rather than losing the work â€
 so a file appears even when a run does not finish. The results screen shows the
 path, or exactly why the write did not happen.
 
+Reports use proper Markdown headings and one stable citation namespace:
+`[Source N]` in the body always resolves to entry N under **Sources**. When a
+page appears in several searches it is merged instead of listed twice, and
+pages that carry no usable text (login walls, blocked fetches, search result
+pages) are dropped before analysis.
+
+After a run, the results screen doubles as a small action menu: open the report
+in the default Markdown app, show it in Finder/Explorer, or jump to the activity
+log. The Rich CLI offers the same open/reveal choices after saving.
+
 ## Logs
 
 Nothing the backend logs ever reaches the screen: the TUI owns the terminal.

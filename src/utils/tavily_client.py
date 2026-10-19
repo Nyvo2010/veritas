@@ -5,6 +5,7 @@ Tavily Client - Handles all interactions with Tavily Search API
 import sys
 import os
 import time
+import inspect
 import requests
 from typing import Dict, Optional
 from urllib.parse import urlparse
@@ -12,6 +13,19 @@ import logging
 from tavily import TavilyClient
 
 log = logging.getLogger("veritas.tavily")
+
+# SDK errors that repeat identically on every attempt. Matched by class name so
+# the check keeps working across tavily-python releases that add or rename
+# error types.
+_NON_RETRYABLE_ERRORS = {
+    "InvalidAPIKeyError",
+    "MissingAPIKeyError",
+    "ForbiddenError",
+    "BadRequestError",
+    "KeylessUnsupportedEndpointError",
+    "UsageLimitExceededError",
+    "TavilyKeylessLimitError",
+}
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -48,7 +62,10 @@ class TavilySearchClient:
         Returns:
             True if should retry, False otherwise
         """
-        if attempt >= self.max_retries:
+        # ``attempt`` is zero-based: the call just made was attempt + 1. Stop
+        # once that was the last one, instead of sleeping first and then
+        # raising a generic "failed after N attempts".
+        if attempt + 1 >= self.max_retries:
             return False
         
         if EXPONENTIAL_BACKOFF:
@@ -61,17 +78,63 @@ class TavilySearchClient:
         return True
     
     def _categorize_url(self, url: str) -> Optional[str]:
-        """Determine which category a URL belongs to"""
-        domain = urlparse(url).netloc.lower()
-        # Remove www. prefix
-        domain = domain.replace("www.", "")
-        
+        """Determine which category a URL belongs to.
+
+        Hosts are matched exactly or on a dot boundary. Substring matching
+        would let ``x.com`` claim ``netflix.com`` and ``github.com`` claim
+        ``notgithub.com``, which corrupts both the quality priors and the
+        exclude list built from the source toggles.
+        """
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except ValueError:
+            return "general"
+        if host.startswith("www."):
+            host = host[4:]
+        if not host:
+            return "general"
+
         for category, domains in WEBSITE_CATEGORIES.items():
             for cat_domain in domains:
-                if cat_domain in domain or domain in cat_domain:
+                listed = str(cat_domain).lower().strip(".")
+                if listed and (host == listed or host.endswith("." + listed)):
                     return category
-        
+
         return "general"
+
+    def _search_accepts_timeout(self) -> bool:
+        """Whether the installed SDK lets a call set its own timeout.
+
+        ``timeout`` was added to ``TavilyClient.search`` after the minimum
+        supported release, so older SDKs would treat it as an unexpected
+        argument. Skip it there and let the SDK's own default apply.
+        """
+        try:
+            return "timeout" in inspect.signature(self.client.search).parameters
+        except (TypeError, ValueError):
+            return False
+
+    def _is_retryable(self, error: Exception) -> bool:
+        """Whether another attempt could plausibly succeed.
+
+        Auth, configuration, and usage-limit failures fail the same way every
+        time, so retrying them only burns the backoff budget before the user
+        sees the real reason.
+        """
+        if type(error).__name__ in _NON_RETRYABLE_ERRORS:
+            return False
+
+        status = getattr(error, "status_code", None)
+        if status is None:
+            status = getattr(getattr(error, "response", None), "status_code", None)
+        if isinstance(status, int):
+            if status == 429 or status >= 500:
+                return True
+            if 400 <= status < 500:
+                return False
+
+        # Bad arguments are a caller bug, not a network blip.
+        return not isinstance(error, (ValueError, TypeError, KeyError, AttributeError))
     
     def search(
         self,
@@ -126,6 +189,11 @@ class TavilySearchClient:
                 
                 if time_range:
                     search_params["time_range"] = time_range
+
+                # Bound every attempt when the SDK supports it, so a stalled
+                # connection cannot hold a search for the SDK's full default.
+                if self._search_accepts_timeout():
+                    search_params["timeout"] = self.timeout
                 
                 if exclude_domains:
                     search_params["exclude_domains"] = exclude_domains[:150]  # Max 150
@@ -162,13 +230,13 @@ class TavilySearchClient:
                 attempt += 1
             
             except requests.exceptions.HTTPError as e:
-                status = getattr(e.response, "status_code", "?")
-                if e.response.status_code == 429:  # Rate limit
+                status = getattr(getattr(e, "response", None), "status_code", "?")
+                if status == 429:  # Rate limit
                     log.warning("tavily rate limit (attempt %s/%s)", attempt + 1, self.max_retries)
                     if not self._handle_retry(attempt, "Rate limit"):
                         raise Exception(f"Tavily rate limit exceeded after {self.max_retries} attempts")
                     attempt += 1
-                elif e.response.status_code >= 500:  # Server error
+                elif isinstance(status, int) and status >= 500:  # Server error
                     log.warning("tavily server error %s (attempt %s/%s)",
                                 status, attempt + 1, self.max_retries)
                     if not self._handle_retry(attempt, "Server error"):
@@ -186,6 +254,9 @@ class TavilySearchClient:
                 attempt += 1
             
             except Exception as e:
+                if not self._is_retryable(e):
+                    log.error("tavily error is not retryable (%s): %s", type(e).__name__, e)
+                    raise Exception(f"Tavily search failed ({type(e).__name__}): {e}")
                 log.warning("unexpected tavily error (attempt %s/%s): %s",
                             attempt + 1, self.max_retries, e)
                 if attempt >= self.max_retries - 1:

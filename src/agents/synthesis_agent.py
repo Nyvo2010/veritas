@@ -18,7 +18,7 @@ from models.research_state import (
     ResearchState
 )
 from utils.llm_client import LLMClient
-from utils.text import clip
+from utils.text import clip, string_list
 
 log = logging.getLogger("veritas.synthesis")
 
@@ -65,9 +65,11 @@ class SynthesisAgent:
             {
                 "title": r.title,
                 "url": r.url,
-                "content": r.full_content if r.full_content else r.content,
+                "content": r.full_content or r.content or "",
                 "score": r.score,
                 "category": r.category,
+                "quality": getattr(r, "quality", 0.0),
+                "published_date": getattr(r, "published_date", None),
             }
             for r in search_results
         ]
@@ -83,26 +85,51 @@ class SynthesisAgent:
         
         # Suppress detailed analysis output
         
-        # Extract and store knowledge finding
-        if analysis.get('answer'):
+        # Extract and store knowledge finding. Model output is untrusted: a
+        # field requested as a list can arrive as one string, which would
+        # otherwise be iterated character by character.
+        answer = str(analysis.get('answer') or '').strip()
+        if answer:
+            try:
+                confidence = float(analysis.get('confidence', 0.5))
+            except (TypeError, ValueError):
+                confidence = 0.5
+            confidence = max(0.0, min(1.0, confidence))
+
+            # The analysis names the result indices that support its answer.
+            # Keeping those URLs (rather than a blind slice of the first five)
+            # is what makes a finding's citations traceable later.
+            cited_urls = []
+            for raw_index in analysis.get('source_indices', []) or []:
+                try:
+                    index = int(raw_index) - 1
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= index < len(search_results):
+                    url = search_results[index].url
+                    if url and url not in cited_urls:
+                        cited_urls.append(url)
+            if not cited_urls:
+                cited_urls = [r.url for r in search_results[:5]]
+
             finding = KnowledgeFinding(
-                content=analysis['answer'],
-                sources=[r.url for r in search_results[:5]],
-                confidence=analysis.get('confidence', 0.5),
+                content=answer,
+                sources=cited_urls[:5],
+                confidence=confidence,
                 question_id=question.id,
-                contradictions=analysis.get('contradictions', []),
+                contradictions=string_list(analysis.get('contradictions')),
             )
             state.findings.append(finding)
             
             # Update question
-            question.answer = analysis['answer']
+            question.answer = answer
             
             # Show the answer, clipped: the panel keeps one line per entry.
             if ui_manager:
-                ui_manager.add_message(f"Insight: {clip(analysis['answer'])}", style="white")
+                ui_manager.add_message(f"Insight: {clip(answer)}", style="white")
         
         # Store identified gaps
-        for gap_desc in analysis.get('gaps', []):
+        for gap_desc in string_list(analysis.get('gaps')):
             gap = ResearchGap(
                 description=gap_desc,
                 question_id=question.id,

@@ -42,6 +42,14 @@ SEARCH_TIMEOUT = 90  # 1.5 minutes for search operations
 MAX_RESEARCH_ITERATIONS = 10
 MAX_SEARCH_RESULTS = 15
 
+# Evidence selection for the analysis model. Tavily returns up to
+# MAX_SEARCH_RESULTS, but only the strongest, most independent subset is worth
+# the context window. Quality and relevance decide the order; the per-domain
+# cap keeps one site from standing in for a consensus.
+MAX_ANALYSIS_RESULTS = 10
+MAX_RESULTS_PER_DOMAIN = 3
+ANALYSIS_CONTENT_CHARS = 2000
+
 # Website domain mappings
 WEBSITE_CATEGORIES = {
     "social": [

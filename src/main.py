@@ -20,14 +20,15 @@ from rich.panel import Panel
 from rich.text import Text
 from rich import box
 
-from models.research_state import ResearchState, QuestionStatus
+from models.research_state import ResearchGap, ResearchState, QuestionStatus
 from agents.query_analyzer import QueryAnalyzerAgent
 from agents.search_agent import SearchAgent
 from agents.synthesis_agent import SynthesisAgent
 from agents.report_generator import ReportGeneratorAgent
 from utils.llm_client import LLMClient
 from utils.tavily_client import TavilySearchClient
-from utils.text import clip
+from utils.sources import build_source_registry, number_for
+from utils.text import as_bool, clip
 from utils.ui_manager import UIManager
 from ui.theme import format_duration
 from settings import load_settings, resolve_api_keys, resolve_llm, reports_dir as resolve_reports_dir
@@ -36,6 +37,7 @@ from config import (
     LLM_API_KEY,
     TAVILY_API_KEY,
     MAX_RESEARCH_ITERATIONS,
+    MAX_SEARCH_RESULTS,
 )
 
 log = logging.getLogger("veritas.research")
@@ -149,6 +151,7 @@ class DeepResearchAgent:
         max_iterations: int = MAX_RESEARCH_ITERATIONS,
         verbose: bool = True,
         ui=None,
+        max_results: Optional[int] = None,
     ) -> ResearchState:
         """
         Execute deep research on a query
@@ -160,6 +163,8 @@ class DeepResearchAgent:
                 frontend such as OpenTUI renders progress itself)
             ui: Optional UI object (UIManager-compatible). A default live
                 UIManager is created when omitted.
+            max_results: Results to request per search. Defaults to the
+                stored setting, clamped to the provider's 1-20 range.
 
         Returns:
             ResearchState with all findings and final report
@@ -188,6 +193,17 @@ class DeepResearchAgent:
         )
 
         completed = 0
+        # The settings screen promises "results per search"; honour it. The
+        # analysis model still gets at most MAX_ANALYSIS_RESULTS, which is a
+        # separate context-window budget.
+        per_search = (
+            max_results if max_results is not None
+            else getattr(self, "_settings", {}).get("max_search_results", MAX_SEARCH_RESULTS)
+        )
+        try:
+            per_search = max(1, min(20, int(per_search)))
+        except (TypeError, ValueError):
+            per_search = MAX_SEARCH_RESULTS
 
         try:
             # Phase 1: Query Decomposition (blocking LLM call off the event loop)
@@ -217,7 +233,6 @@ class DeepResearchAgent:
             iteration = 0
             max_iter = min(max_iterations, len(state.question_queue))
             consecutive_failures = 0
-            max_consecutive_failures = 3
 
             while iteration < max_iterations and state.question_queue:
                 iteration += 1
@@ -232,8 +247,10 @@ class DeepResearchAgent:
                 state.reasoning_steps.append(f"\nIteration {iteration}: Processing question {iteration}/{max_iter}")
                 state.reasoning_steps.append(f"  Question: {question.question}")
 
-                # Determine search depth adaptively
-                previous_confidence = 0.0
+                # Determine search depth adaptively. A question is normally
+                # searched once, so there is no earlier confidence to escalate
+                # on: None means "unknown", not "low".
+                previous_confidence = None
                 if question.answer:
                     findings = state.get_findings_for_question(question.id)
                     if findings:
@@ -257,6 +274,7 @@ class DeepResearchAgent:
                         question=question,
                         state=state,
                         search_depth=search_depth,
+                        max_results=per_search,
                         include_full_content=True,
                         ui_manager=ui,
                     ),
@@ -271,18 +289,24 @@ class DeepResearchAgent:
                 )
 
                 if not search_results:
-                    question.status = QuestionStatus.FAILED
+                    # Mark completion first: it removes the question from the
+                    # queue and would otherwise overwrite the failed status.
                     state.mark_question_completed(question.id)
+                    question.status = QuestionStatus.FAILED
                     consecutive_failures += 1
 
                     state.reasoning_steps.append(f"  Result: Search failed - no results found (consecutive failures: {consecutive_failures})")
+                    _ui_log(ui, "warn", "No results - skipping this question")
 
-                    if consecutive_failures >= max_consecutive_failures:
-                        error_msg = f"Aborting research: {max_consecutive_failures} consecutive search failures detected"
-                        ui.add_message(error_msg, style="red bold")
-                        ui.add_message("This usually indicates API issues, rate limiting, or network problems", style="yellow")
-                        state.reasoning_steps.append(f"\nResearch aborted: {error_msg}")
-                        raise Exception(error_msg)
+                    # An empty result set is a normal outcome for an over-specific
+                    # question, not proof the API is down. Skip it and keep the
+                    # rest of the research; a genuine outage still fails when the
+                    # remaining calls exhaust their retries.
+                    if consecutive_failures == 3:
+                        log.warning(
+                            "three consecutive searches returned no results; "
+                            "continuing (check API status if this persists)"
+                        )
 
                     completed += 1
                     ui.set_progress(completed, f"Iteration {iteration}/{max_iter} - no results")
@@ -318,7 +342,7 @@ class DeepResearchAgent:
                 state.reasoning_steps.append(f"  Analysis: {confidence:.0%} confidence")
 
                 # Generate follow-up questions if needed
-                if analysis.get("needs_more_research") and iteration < max_iterations - 1:
+                if as_bool(analysis.get("needs_more_research")) and iteration < max_iterations - 1:
                     ui.set_status(f"Iteration {iteration}/{max_iter} - Checking for follow-ups...")
                     follow_ups, elapsed = await _timed(
                         asyncio.to_thread(
@@ -346,13 +370,19 @@ class DeepResearchAgent:
                 # Periodic gap analysis
                 if iteration % 3 == 0:
                     ui.set_status(f"Iteration {iteration}/{max_iter} - Reviewing knowledge gaps...")
-                    gaps, elapsed = await _timed(
+                    gap_items, elapsed = await _timed(
                         asyncio.to_thread(
                             self.query_analyzer.identify_knowledge_gaps, state, ui
                         ),
                         kind="llm", label=f"knowledge_gaps[{iteration}]", ui=ui,
                     )
-                    _ui_log(ui, "ok", f"Gap review found {len(gaps)} gaps ({_seconds(elapsed)})")
+                    added = self._record_gaps(state, gap_items)
+                    _ui_log(
+                        ui, "ok",
+                        f"Gap review found {len(gap_items)} gaps"
+                        + (f" ({added} new)" if added != len(gap_items) else "")
+                        + f" ({_seconds(elapsed)})",
+                    )
 
             # Phase 3: Cross-Reference Findings
             ui.set_phase("Phase 3: Cross-Reference")
@@ -361,11 +391,16 @@ class DeepResearchAgent:
             state.reasoning_steps.append("\nPhase 3: Cross-Reference - Starting cross-reference analysis")
 
             try:
-                _, elapsed = await _timed(
+                cross_ref, elapsed = await _timed(
                     asyncio.to_thread(
                         self.synthesis_agent.cross_reference_findings, state, ui
                     ),
                     kind="llm", label="cross_reference", ui=ui,
+                )
+                # The call is already paid for; keep its consensus and
+                # contradictions for the report instead of dropping them.
+                state.cross_reference = (
+                    cross_ref if isinstance(cross_ref, dict) else {}
                 )
                 _ui_log(ui, "ok", f"Findings cross-referenced ({_seconds(elapsed)})")
             except Exception as e:
@@ -422,10 +457,12 @@ class DeepResearchAgent:
             state.end_time = datetime.now()
             duration = (state.end_time - state.start_time).total_seconds()
             ledger = getattr(ui, "timings", None)
+            answered = state.answered_questions()
+            failed = state.failed_questions()
             log.info(
-                "research complete in %.1fs: %s iterations, %s questions, %s searches, "
-                "%s findings, %s gaps, report %s chars%s",
-                duration, state.iteration_count, len(state.completed_questions),
+                "research complete in %.1fs: %s iterations, %s answered, %s failed, "
+                "%s searches, %s findings, %s gaps, report %s chars%s",
+                duration, state.iteration_count, len(answered), len(failed),
                 state.total_searches, len(state.findings), len(state.gaps),
                 len(final_report),
                 f"; {ledger.summary()}" if ledger is not None else "",
@@ -439,9 +476,17 @@ class DeepResearchAgent:
 
             summary_table.add_row("Duration:", f"{duration:.1f}s")
             summary_table.add_row("Iterations:", str(state.iteration_count))
-            summary_table.add_row("Questions:", str(len(state.completed_questions)))
+            summary_table.add_row("Questions answered:", str(len(answered)))
+            if failed:
+                summary_table.add_row("Questions failed:", str(len(failed)))
             summary_table.add_row("Searches:", str(state.total_searches))
             summary_table.add_row("Findings:", str(len(state.findings)))
+            contradictions = (
+                state.cross_reference.get("contradictions", [])
+                if isinstance(state.cross_reference, dict) else []
+            )
+            if contradictions:
+                summary_table.add_row("Contradictions:", str(len(contradictions)))
             summary_table.add_row("Gaps Identified:", str(len(state.gaps)))
             summary_table.add_row("Report Length:", f"{len(final_report):,} chars")
 
@@ -484,6 +529,35 @@ class DeepResearchAgent:
             # Re-raise the exception
             raise
 
+    def _record_gaps(self, state: ResearchState, gap_items) -> int:
+        """Store gap-analysis output once, keeping severity when provided.
+
+        Returns the number of newly recorded gaps. The same gap often comes
+        back from two reviews, so duplicates are dropped by description.
+        """
+        existing = {gap.description.strip().lower() for gap in state.gaps}
+        added = 0
+        for item in gap_items or []:
+            if isinstance(item, dict):
+                description = str(item.get("description") or "").strip()
+                severity = str(item.get("severity") or "moderate").strip().lower()
+            else:
+                description = str(item or "").strip()
+                severity = "moderate"
+            if not description or description.lower() in existing:
+                continue
+            if severity not in ("critical", "moderate", "minor"):
+                severity = "moderate"
+            state.gaps.append(ResearchGap(
+                description=description,
+                question_id="overall",
+                severity=severity,
+                suggested_searches=[],
+            ))
+            existing.add(description.lower())
+            added += 1
+        return added
+
     def save_report(self, state: ResearchState, filename: str = None) -> str:
         """
         Write the report to disk.
@@ -524,7 +598,12 @@ class DeepResearchAgent:
         else:
             parent = os.path.dirname(os.path.abspath(filename))
             if parent:
-                os.makedirs(parent, exist_ok=True)
+                try:
+                    os.makedirs(parent, exist_ok=True)
+                except OSError as e:
+                    self.save_error = f"cannot create the report folder {parent}: {e}"
+                    log.error("save failed: %s", self.save_error)
+                    return None
 
         try:
             with open(filename, 'w', encoding='utf-8') as f:
@@ -542,28 +621,52 @@ class DeepResearchAgent:
         state = state if state is not None else self.last_state
         if state is None:
             return ""
+        source_numbers, entries = build_source_registry(state.search_results)
+
+        def cite(urls) -> str:
+            numbers = []
+            for url in urls:
+                number = number_for(url, source_numbers)
+                if number and number not in numbers:
+                    numbers.append(number)
+            return "".join(f"[Source {number}]" for number in numbers)
+
         if state.report_sections:
             body = "\n\n".join(
-                f"{section.title.upper()}\n\n{section.content}"
+                f"## {section.title.strip()}\n\n{section.content.strip()}"
                 for section in sorted(state.report_sections, key=lambda s: s.order)
             )
         elif state.findings:
-            body = "\n\n".join(
-                f"- {finding.content}\n  Sources: {', '.join(finding.sources[:3])}"
-                for finding in state.findings
-            )
+            lines = []
+            for finding in state.findings:
+                marker = cite(finding.sources)
+                lines.append(f"- {finding.content}" + (f" {marker}" if marker else ""))
+            body = "\n".join(lines)
         else:
             return ""
-        answered = [q for q in state.completed_questions]
+
+        # ``completed_questions`` is "processed" bookkeeping and includes
+        # questions whose search failed, so count the statuses instead.
+        answered = len(state.answered_questions())
+        failed = len(state.failed_questions())
+        coverage = f"Questions answered: {answered}"
+        if failed:
+            coverage += f"  ·  Questions failed: {failed}"
         header = (
-            f"Research Report (partial): {state.main_query}\n\n"
-            "This run did not finish, so nothing was summarised or cross-checked "
+            f"# Research Report (partial): {state.main_query}\n\n"
+            "> This run did not finish, so nothing was summarised or cross-checked "
             "here. It contains the raw findings collected before it stopped.\n\n"
-            f"Questions answered: {len(answered)}\n"
-            f"Sources consulted: {len(state.search_results)}\n\n"
-            + "\u2550" * 80 + "\n\n"
+            f"{coverage}  ·  Unique sources: {len(entries)}\n\n"
+            "---\n\n"
         )
-        return header + body
+        report = header + body + "\n"
+        if entries:
+            source_lines = "\n".join(
+                f"{entry.number}. [Source {entry.number}] {entry.title}\n   <{entry.url}>"
+                for entry in entries
+            )
+            report += "\n---\n\n## Sources\n\n" + source_lines + "\n"
+        return report
 
     def set_category_toggle(self, category: str, enabled: bool, silent: bool = False):
         """

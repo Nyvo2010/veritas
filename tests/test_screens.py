@@ -49,6 +49,7 @@ class ScreenRenderTests(unittest.IsolatedAsyncioTestCase):
         tui_app.prog_sig.set((0.0, 1, "Starting..."))
         tui_app.phase_sig.set("Preparing...")
         tui_app.state["query"] = ""
+        tui_app.state["result"] = None
 
     async def render(self, screen, width, height, prepare=None):
         setup = await test_render(tui_app.App, {"width": width, "height": height})
@@ -109,6 +110,42 @@ class ScreenRenderTests(unittest.IsolatedAsyncioTestCase):
         tui_app.log_sig.set(SAMPLE_LOG)
         second = await self.render("run", 100, 40, prepare)
         self.assertEqual(used_rows(first), used_rows(second), "the run screen must not resize mid-run")
+
+    async def test_done_screen_offers_report_actions_and_fits(self):
+        result = {
+            "ok": True,
+            "duration": 91.0,
+            "iterations": 4,
+            "questions": 4,
+            "searches": 4,
+            "sources": 12,
+            "citations": 34,
+            "findings": 6,
+            "gaps": 2,
+            "report_len": 12000,
+            "saved": "/tmp/research_report_example.md",
+            "save_error": "",
+        }
+
+        def prepare():
+            tui_app.log_sig.set(SAMPLE_LOG)
+            tui_app.state["result"] = result
+
+        for width, height in SIZES:
+            with self.subTest(size=f"{width}x{height}"):
+                frame = await self.render("done", width, height, prepare)
+                self.assertLessEqual(len(frame.split("\n")), height)
+                self.assertIn("Open report", frame)
+                self.assertIn("Show in file manager", frame)
+                self.assertIn("Sources", frame)
+                self.assertIn("Citations", frame)
+
+    async def test_menu_keeps_the_last_report_reachable(self):
+        def prepare():
+            tui_app.state["result"] = {"ok": True, "saved": "/tmp/report.md"}
+
+        frame = await self.render("menu", 100, 40, prepare)
+        self.assertIn("Last report", frame)
 
     async def test_activity_log_screen_lists_the_last_run(self):
         def prepare():

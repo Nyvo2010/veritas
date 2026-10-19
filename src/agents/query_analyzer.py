@@ -11,6 +11,7 @@ from typing import List, Dict
 
 from models.research_state import SubQuestion, ResearchState, QuestionStatus
 from utils.llm_client import LLMClient
+from utils.text import as_bool, as_int, string_list
 import uuid
 
 class QueryAnalyzerAgent:
@@ -61,18 +62,26 @@ class QueryAnalyzerAgent:
 
         # Use LLM to decompose query
         decomposition = self.llm.decompose_query(main_query)
-        
+        raw_questions = (
+            decomposition.get("sub_questions")
+            if isinstance(decomposition, dict) else None
+        )
+        if not isinstance(raw_questions, list):
+            raw_questions = []
+
         # Convert to SubQuestion objects
         sub_questions = []
         
-        for i, sq_data in enumerate(decomposition.get("sub_questions", [])):
+        for sq_data in raw_questions:
+            if not isinstance(sq_data, dict):
+                continue  # skip malformed entries rather than crash later
             question_text = str(sq_data.get("question") or "").strip()
             if not question_text:
-                continue  # skip malformed entries rather than crash later
+                continue
             sub_q = SubQuestion(
                 id=str(uuid.uuid4()),
                 question=question_text,
-                priority=sq_data.get("priority", 5),
+                priority=as_int(sq_data.get("priority"), default=5, low=0, high=10),
                 depth=0,  # Top-level questions
                 status=QuestionStatus.PENDING,
             )
@@ -111,12 +120,13 @@ class QueryAnalyzerAgent:
                 ui_manager.add_message("Max depth reached - no follow-ups", style="dim yellow")
             return []
         
-        # Check if more research is needed
-        if not analysis_result.get("needs_more_research", False):
+        # Check if more research is needed. Models sometimes answer with the
+        # string "false", which is truthy in Python.
+        if not as_bool(analysis_result.get("needs_more_research")):
             return []
         
-        follow_ups = analysis_result.get("follow_up_questions", [])
-        gaps = analysis_result.get("gaps", [])
+        follow_ups = string_list(analysis_result.get("follow_up_questions"))
+        gaps = string_list(analysis_result.get("gaps"))
         
         if not follow_ups and not gaps:
             if ui_manager:
@@ -143,7 +153,7 @@ class QueryAnalyzerAgent:
         self,
         state: ResearchState,
         ui_manager=None
-    ) -> List[str]:
+    ) -> List[Dict]:
         """
         Meta-analysis to identify overall knowledge gaps across all findings
         
@@ -151,7 +161,8 @@ class QueryAnalyzerAgent:
             state: Current research state
         
         Returns:
-            List of identified gaps
+            Gaps as ``{"description": str, "severity": str}`` dicts, so the
+            caller can keep critical and moderate gaps distinct.
         """
         if not state.findings:
             return []
@@ -185,12 +196,15 @@ Return JSON:
         try:
             gaps_data = self.llm.chat_json(messages)
             
-            all_gaps = (
-                gaps_data.get("critical_gaps", []) + 
-                gaps_data.get("moderate_gaps", [])
-            )
-            
-            return all_gaps
+            gaps = [
+                {"description": description, "severity": severity}
+                for severity, key in (("critical", "critical_gaps"),
+                                      ("moderate", "moderate_gaps"))
+                for description in string_list(
+                    gaps_data.get(key) if isinstance(gaps_data, dict) else None
+                )
+            ]
+            return gaps
 
         except Exception as e:
             if ui_manager:

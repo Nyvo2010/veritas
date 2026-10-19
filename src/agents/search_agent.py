@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import asyncio
 import logging
+from collections import Counter
 from typing import List, Optional
 
 from models.research_state import (
@@ -18,8 +19,15 @@ from models.research_state import (
 )
 from utils.tavily_client import TavilySearchClient
 from utils.llm_client import LLMClient
+from utils.sources import (
+    canonical_url,
+    content_fingerprint,
+    merge_result,
+    prepare_results,
+    select_for_analysis,
+)
 from utils.text import clip
-from config import MAX_SEARCH_RESULTS
+from config import MAX_ANALYSIS_RESULTS, MAX_RESULTS_PER_DOMAIN, MAX_SEARCH_RESULTS
 
 log = logging.getLogger("veritas.search")
 
@@ -84,23 +92,74 @@ class SearchAgent:
             state.total_searches += 1
 
             # Convert to SearchResult objects
-            results = []
+            candidates = []
             raw_results = response.get("results", [])
             
             for result_data in raw_results:
-                result = SearchResult(
+                candidates.append(SearchResult(
                     url=result_data.get("url"),
-                    title=result_data.get("title"),
-                    content=result_data.get("content", ""),
+                    title=result_data.get("title") or "",
+                    # A null field from the API must not reach slicing in the
+                    # analysis prompt.
+                    content=result_data.get("content") or "",
                     score=result_data.get("score", 0.0),
                     full_content=result_data.get("raw_content"),
                     category=result_data.get("category", "general"),
                     question_id=question.id,
+                    published_date=(
+                        result_data.get("published_date")
+                        or result_data.get("publishedDate")
+                    ),
+                ))
+
+            # Drop pages that carry no evidence and fold duplicates into one
+            # record. Repeating the same URL across questions must not inflate
+            # the source count or create two bibliography entries.
+            usable, rejected = prepare_results(candidates)
+            if rejected:
+                reasons = Counter(reason for _, reason in rejected)
+                log.info(
+                    "filtered %s of %s results: %s",
+                    len(rejected), len(candidates),
+                    ", ".join(f"{reason} x{count}" for reason, count in reasons.items()),
                 )
-                results.append(result)
+
+            by_url = {}
+            by_text = {}
+            for existing in state.search_results:
+                by_url[canonical_url(existing.url)] = existing
+                fingerprint = content_fingerprint(existing)
+                if fingerprint:
+                    by_text[fingerprint] = existing
+
+            results = []
+            for result in usable:
+                key = canonical_url(result.url)
+                existing = by_url.get(key)
+                fingerprint = content_fingerprint(result)
+                if existing is None and fingerprint:
+                    existing = by_text.get(fingerprint)
+
+                if existing is not None:
+                    merge_result(existing, result)
+                    results.append(existing)
+                    continue
+
                 state.search_results.append(result)
-            
-            return results
+                by_url[key] = result
+                if fingerprint:
+                    by_text[fingerprint] = result
+                results.append(result)
+
+            # The state keeps every usable source for the bibliography; the
+            # analysis model gets only the strongest, most independent subset
+            # so quality actually shapes the answer instead of just decorating
+            # it.
+            return select_for_analysis(
+                results,
+                limit=MAX_ANALYSIS_RESULTS,
+                per_domain=MAX_RESULTS_PER_DOMAIN,
+            )
         
         except Exception as e:
             error_msg = f"Search failed for '{search_query[:50]}...': {str(e)}"
@@ -154,31 +213,40 @@ class SearchAgent:
         self,
         question: SubQuestion,
         iteration: int,
-        previous_confidence: float = 0.0
+        previous_confidence: Optional[float] = None
     ) -> str:
         """
-        Determine search depth adaptively
-        
+        Choose the cheapest search depth that can still answer the question.
+
+        Tavily charges twice as much for ``advanced``, so it is reserved for
+        questions that need it: high priority, explicit freshness or finance
+        questions, long multi-clause questions, and a re-search after a
+        low-confidence answer. A question searched for the first time has no
+        previous confidence, which must not be mistaken for zero.
+
         Args:
             question: The question being searched
-            iteration: Current iteration number
-            previous_confidence: Confidence from previous search
-        
+            iteration: Current iteration number (kept for callers that track it)
+            previous_confidence: Confidence from an earlier search of this
+                question, or None when there was none
+
         Returns:
             "basic" or "advanced"
         """
-        # Use advanced for:
-        # - High priority questions
-        # - Low confidence from previous search
-        # - Later iterations (dive deeper)
-        
         if question.priority >= 8:
             return "advanced"
-        
-        if previous_confidence < 0.5:
+
+        if previous_confidence is not None and previous_confidence < 0.5:
             return "advanced"
-        
-        if iteration > 2 and previous_confidence < 0.7:
+
+        text = question.question or ""
+        if len(text.split()) >= 15:
             return "advanced"
-        
+
+        if self._determine_topic(text) in ("news", "finance"):
+            return "advanced"
+
+        if self._determine_time_range(text):
+            return "advanced"
+
         return "basic"

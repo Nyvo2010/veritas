@@ -17,6 +17,7 @@ Optional: VERITAS_REPORTS_DIR to override the reports directory.
 import json
 import os
 import sys
+import tempfile
 from copy import deepcopy
 from typing import Any, Dict, Tuple
 
@@ -85,13 +86,25 @@ def save_settings(settings: Dict[str, Any]) -> str:
     path = settings_path()
     # Only persist known keys so hand-edited files stay clean.
     payload = {key: settings.get(key, DEFAULTS[key]) for key in DEFAULTS}
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-        f.write("\n")
+    # The file holds API keys, so it must never exist with default permissions,
+    # and a crash mid-write must not leave a truncated file. ``mkstemp`` creates
+    # it owner-only; the rename makes the swap atomic.
+    handle, temporary = tempfile.mkstemp(prefix=".settings-", dir=directory)
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+        with os.fdopen(handle, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+            f.write("\n")
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
     return path
 
 

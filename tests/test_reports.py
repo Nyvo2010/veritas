@@ -26,8 +26,11 @@ from utils.llm_client import LLMClient  # noqa: E402
 logging.getLogger("veritas").setLevel(logging.INFO)  # keep test output quiet
 from models.research_state import (  # noqa: E402
     KnowledgeFinding,
+    QuestionStatus,
     ReportSection,
     ResearchState,
+    SearchResult,
+    SubQuestion,
 )
 
 
@@ -116,6 +119,20 @@ class SaveReportTests(unittest.TestCase):
             self.assertIsNone(agent.save_report(state))
         self.assertTrue(agent.save_error, "the caller needs a reason to show")
 
+    def test_explicit_filename_with_a_blocked_parent_reports_the_reason(self):
+        blocker = os.path.join(self.tmp, "file-not-dir")
+        with open(blocker, "w", encoding="utf-8") as handle:
+            handle.write("x")
+        state = make_state()
+        state.final_report = "body"
+        target = os.path.join(blocker, "report.md")
+
+        with self.assertLogs("veritas.research", level="ERROR"):
+            path = self.agent.save_report(state, filename=target)
+
+        self.assertIsNone(path)
+        self.assertIn("cannot create the report folder", self.agent.save_error)
+
     def test_explicit_filename_is_honoured(self):
         target = os.path.join(self.tmp, "nested", "custom.md")
         state = make_state()
@@ -139,12 +156,31 @@ class PartialReportTests(unittest.TestCase):
         )
         body = agent.build_partial_report(state)
         self.assertIn("How do quantization schemes differ?", body)
-        self.assertIn("ANALYSIS", body)
+        self.assertIn("## Analysis", body)
         self.assertIn("Body text.", body)
 
     def test_empty_state_produces_nothing(self):
         agent = make_agent(tempfile.gettempdir())
         self.assertEqual(agent.build_partial_report(make_state()), "")
+
+    def test_header_separates_failed_questions_from_answered(self):
+        agent = make_agent(tempfile.gettempdir())
+        state = make_state()
+        state.add_question(SubQuestion(id="q1", question="answered one"))
+        state.add_question(SubQuestion(id="q2", question="failed one"))
+        state.mark_question_completed("q1")
+        state.mark_question_completed("q2")
+        # The failed question stays in completed_questions (loop bookkeeping),
+        # so the header must count statuses rather than that set.
+        state.get_question_by_id("q2").status = QuestionStatus.FAILED
+        state.findings.append(KnowledgeFinding(
+            content="kept", sources=[], confidence=0.4, question_id="q1"
+        ))
+
+        body = agent.build_partial_report(state)
+
+        self.assertIn("Questions answered: 1", body)
+        self.assertIn("Questions failed: 1", body)
 
     def test_uses_last_state_when_no_state_is_given(self):
         agent = make_agent(tempfile.gettempdir())
@@ -214,6 +250,140 @@ class SectionOrderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed, 1)
         self.assertEqual([s.title for s in sections], ["Alpha", "Beta"])
         self.assertIn("failed", sections[0].content.lower())
+
+
+class MetaAnalysisRenderingTests(unittest.TestCase):
+    def test_gaps_section_uses_cross_reference(self):
+        state = make_state()
+        state.cross_reference = {
+            "consensus_points": [
+                {"point": "Both sources agree on X", "confidence": 0.8},
+            ],
+            "contradictions": [
+                {"topic": "Cost", "viewpoint_a": "Cheap", "viewpoint_b": "Expensive"},
+            ],
+            "reliability_assessment": "Peer-reviewed sources dominate.",
+        }
+
+        content = ReportGeneratorAgent(None)._generate_gaps_section(state)
+
+        self.assertIn("Points of agreement", content)
+        self.assertIn("Both sources agree on X", content)
+        self.assertIn("**Cost**: Cheap — Expensive", content)
+        self.assertIn("Peer-reviewed sources dominate.", content)
+
+    def test_unmapped_findings_are_spread_across_themes(self):
+        state = make_state()
+        for i in range(6):
+            state.findings.append(
+                KnowledgeFinding(content=f"f{i}", sources=[], confidence=0.5, question_id="q")
+            )
+        agent = ReportGeneratorAgent(None)
+
+        buckets = [
+            [f.content for f in agent._fallback_findings(state, i, 3)]
+            for i in range(3)
+        ]
+
+        self.assertEqual(
+            [finding for bucket in buckets for finding in bucket],
+            ["f0", "f3", "f1", "f4", "f2", "f5"],
+        )
+        self.assertEqual(len({tuple(bucket) for bucket in buckets}), 3)
+
+
+class GapRecordingTests(unittest.TestCase):
+    def test_gaps_are_stored_once_and_keep_severity(self):
+        agent = DeepResearchAgent.__new__(DeepResearchAgent)
+        state = make_state()
+
+        added = agent._record_gaps(state, [
+            {"description": "Missing pricing data", "severity": "critical"},
+            {"description": "missing PRICING data", "severity": "critical"},
+            {"description": "", "severity": "critical"},
+        ])
+
+        self.assertEqual(added, 1)
+        self.assertEqual(len(state.gaps), 1)
+        self.assertEqual(state.gaps[0].description, "Missing pricing data")
+        self.assertEqual(state.gaps[0].severity, "critical")
+
+
+class _ReportPipelineLLM:
+    """Deterministic stand-in for the three model calls a report makes."""
+
+    model = "stub-model"
+
+    def __init__(self):
+        self.seen_findings = None
+
+    def identify_report_themes(self, findings):
+        return {"themes": [
+            {"title": "Mechanism", "description": "How it works", "related_findings": [0]},
+        ]}
+
+    def generate_section_async(self, *, section_title, theme_description,
+                               relevant_findings, main_query, style):
+        self.seen_findings = relevant_findings
+
+        async def run():
+            return (
+                "A supported claim [Source 1]. "
+                "A corroborated claim [Sources 2, 1]. "
+                "An invented citation [Source 99]."
+            )
+
+        return run()
+
+    def generate_executive_summary(self, main_query, sections, key_findings):
+        return "A summary that keeps a section citation [Source 1]."
+
+
+class ReportCitationPipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_citations_bibliography_and_summary_agree(self):
+        state = make_state("How do quantization schemes differ?")
+        state.search_results = [
+            SearchResult(
+                url="https://example.com/paper",
+                title="Quantization paper",
+                content="q" * 600,
+                score=0.9,
+                category="educational",
+                published_date="2026-01-02",
+            ),
+            SearchResult(
+                url="https://example.org/analysis",
+                title="Quantization analysis",
+                content="a" * 600,
+                score=0.8,
+                category="news",
+            ),
+        ]
+        state.findings = [KnowledgeFinding(
+            content="Quantization trades accuracy for speed.",
+            sources=["https://example.com/paper", "https://example.org/analysis"],
+            confidence=0.8,
+            question_id="q1",
+        )]
+
+        llm = _ReportPipelineLLM()
+        report = await ReportGeneratorAgent(llm).generate_report(state)
+
+        # The section prompt used the report-wide numbers, not local indices.
+        self.assertEqual(llm.seen_findings[0]["source_numbers"], [1, 2])
+        self.assertIn("A supported claim [Source 1].", report)
+        self.assertIn("A corroborated claim [Source 2][Source 1].", report)
+        self.assertNotIn("Source 99", report)
+        # The summary may reuse a source the sections cited, but not invent one.
+        self.assertIn("A summary that keeps a section citation [Source 1].", report)
+        self.assertIn("## Executive Summary", report)
+        self.assertIn("## Mechanism", report)
+        self.assertIn("## Sources", report)
+        self.assertIn("1. [Source 1] **Quantization paper**", report)
+        self.assertIn("Published: 2026-01-02", report)
+        self.assertIn("2. [Source 2] **Quantization analysis**", report)
+        self.assertEqual(state.report_sections[0].sources,
+                         ["https://example.com/paper", "https://example.org/analysis"])
 
 
 class _SyncSectionLLM(LLMClient):

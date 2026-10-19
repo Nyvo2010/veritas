@@ -14,6 +14,13 @@ from typing import List, Dict
 
 from models.research_state import ResearchState, ReportSection
 from utils.llm_client import LLMClient
+from utils.sources import (
+    build_source_registry,
+    citation_count,
+    cited_numbers,
+    normalize_citations,
+    number_for,
+)
 from utils.text import clip
 from config import MAX_PARALLEL_SECTIONS
 
@@ -69,6 +76,10 @@ class ReportGeneratorAgent:
                 ui_manager.add_message(message, style="white")
 
         started = time.perf_counter()
+        # One registry for the whole document: the same number labels evidence
+        # in every section prompt and the bibliography. Building it here (not
+        # per section) is what keeps citations from drifting.
+        source_numbers, source_entries = build_source_registry(state.search_results)
 
         # Step 1: Identify major themes through meta-analysis
         if ui_manager:
@@ -80,7 +91,7 @@ class ReportGeneratorAgent:
 
         # Step 2: Generate sections in parallel
         sections, failed = await self._generate_sections_parallel(
-            state, themes, style, ui_manager, base_step + 2
+            state, themes, style, ui_manager, base_step + 2, source_numbers
         )
         if failed:
             note("warn", f"{failed} of {len(sections) + failed} sections did not complete")
@@ -90,6 +101,15 @@ class ReportGeneratorAgent:
             ui_manager.set_status("Writing executive summary...")
         summary_started = time.perf_counter()
         executive_summary = await self._generate_executive_summary(state, sections)
+        # The summary has no evidence list of its own, so only numbers that a
+        # section actually cited survive: enough to keep its claims traceable,
+        # without letting it invent a source the body never used.
+        summary_numbers = cited_numbers("\n".join(s.content for s in sections))
+        executive_summary = normalize_citations(
+            executive_summary,
+            valid_numbers=set(source_numbers.values()),
+            allowed_numbers=summary_numbers,
+        )
         note("ok", f"Executive summary written ({time.perf_counter() - summary_started:.0f}s)")
         if advance:
             advance(1, "Executive summary complete")
@@ -98,7 +118,7 @@ class ReportGeneratorAgent:
         gaps_section = self._generate_gaps_section(state)
 
         # Step 5: Generate sources section
-        sources_section = self._generate_sources_section(state)
+        sources_section = self._generate_sources_section(state, source_entries)
 
         # Step 6: Assemble final report
         final_report = self._assemble_report(
@@ -106,15 +126,18 @@ class ReportGeneratorAgent:
             executive_summary,
             sections,
             gaps_section,
-            sources_section
+            sources_section,
+            source_entries,
         )
         if advance:
             advance(1, "Report assembled")
 
         state.final_report = final_report
         log.info(
-            "report assembled: %s sections, %s chars, %s failed, %.1fs total",
-            len(sections), len(final_report), failed, time.perf_counter() - started,
+            "report assembled: %s sections, %s unique sources, %s citations, "
+            "%s chars, %s failed, %.1fs total",
+            len(sections), len(source_entries), citation_count(final_report),
+            len(final_report), failed, time.perf_counter() - started,
         )
 
         return final_report
@@ -146,7 +169,8 @@ class ReportGeneratorAgent:
         themes: Dict,
         style: str,
         ui_manager=None,
-        base_step: int = 0
+        base_step: int = 0,
+        source_numbers: dict = None,
     ) -> tuple:
         """
         Generate report sections in parallel using asyncio.
@@ -165,30 +189,54 @@ class ReportGeneratorAgent:
                 "related_findings": [],
             }]
 
+        def finding_numbers(finding) -> list:
+            """Report-wide numbers for a finding's supporting URLs."""
+            numbers = []
+            for url in finding.sources:
+                number = number_for(url, source_numbers or {})
+                if number and number not in numbers:
+                    numbers.append(number)
+            return numbers
+
         for i, theme in enumerate(theme_list):
-            # Get findings related to this theme
-            related_indices = theme.get('related_findings', [])
-            # Convert indices to integers (in case they're strings from JSON)
-            related_indices = [int(idx) for idx in related_indices if str(idx).isdigit()]
-            relevant_findings = [
-                {
-                    "content": state.findings[idx].content,
-                    "sources": state.findings[idx].sources,
-                    "confidence": state.findings[idx].confidence
-                }
+            # Get findings related to this theme. Indices are model output and
+            # can arrive as strings, a bare number, or not at all.
+            raw_indices = theme.get('related_findings') or []
+            if not isinstance(raw_indices, list):
+                raw_indices = []
+            related_indices = [
+                int(idx) for idx in raw_indices if str(idx).isdigit()
+            ]
+            mapped_findings = [
+                state.findings[idx]
                 for idx in related_indices if idx < len(state.findings)
             ]
-            
-            # If no specific findings mapped, use all findings
-            if not relevant_findings:
-                relevant_findings = [
-                    {
-                        "content": f.content,
-                        "sources": f.sources,
-                        "confidence": f.confidence
-                    }
-                    for f in state.findings[:10]  # Limit to prevent token overflow
-                ]
+
+            # If the model mapped no findings, spread the evidence across the
+            # themes instead of handing every section the same first ten.
+            if not mapped_findings:
+                mapped_findings = self._fallback_findings(
+                    state, i, len(theme_list)
+                )
+
+            relevant_findings = [
+                {
+                    "content": f.content,
+                    "sources": f.sources,
+                    "confidence": f.confidence,
+                    "source_numbers": finding_numbers(f),
+                }
+                for f in mapped_findings
+            ]
+            section_urls = list(dict.fromkeys(
+                url for f in mapped_findings for url in f.sources
+                if number_for(url, source_numbers or {})
+            ))
+            section_numbers = {
+                number
+                for finding in relevant_findings
+                for number in finding.get("source_numbers", [])
+            }
             
             # Create async task
             title = theme.get("title") or f"Section {i + 1}"
@@ -200,7 +248,7 @@ class ReportGeneratorAgent:
                 main_query=state.main_query,
                 style=style
             )
-            tasks.append((i, title, task))
+            tasks.append((i, title, task, section_numbers, section_urls))
         
         # Execute tasks with concurrency limit
         sections = []
@@ -213,7 +261,7 @@ class ReportGeneratorAgent:
             elif ui_manager is not None:
                 ui_manager.add_message(message, style="white")
 
-        async def generate_with_progress(order, title, task):
+        async def generate_with_progress(order, title, task, section_numbers, section_urls):
             async with semaphore:
                 started = time.perf_counter()
                 note("info", f"Writing section: {clip(title)}")
@@ -222,31 +270,41 @@ class ReportGeneratorAgent:
                 except asyncio.TimeoutError:
                     log.warning("section %r timed out after %.0fs", title, SECTION_TIMEOUT)
                     note("warn", f"Section timed out after {SECTION_TIMEOUT:.0f}s: {clip(title)}")
-                    return order, title, SECTION_TIMEOUT_PLACEHOLDER.format(seconds=SECTION_TIMEOUT), True
+                    return (order, title, SECTION_TIMEOUT_PLACEHOLDER.format(seconds=SECTION_TIMEOUT),
+                            section_urls, True)
                 except Exception as e:
                     log.error("section %r failed: %s", title, e, exc_info=True)
                     note("err", f"Section failed: {clip(title)} ({clip(str(e), 60)})")
-                    return order, title, f"[Section generation failed: {e}]", True
+                    return order, title, f"[Section generation failed: {e}]", section_urls, True
                 duration = time.perf_counter() - started
-                log.info("section %r done in %.1fs (%s chars)", title, duration, len(content))
+                # Every marker in the body must resolve to a source that was
+                # actually supplied for this section and exists in the report
+                # bibliography. Malformed or invented numbers are dropped.
+                content = normalize_citations(
+                    content,
+                    valid_numbers=set((source_numbers or {}).values()),
+                    allowed_numbers=section_numbers,
+                )
+                log.info("section %r done in %.1fs (%s chars, %s citations)",
+                         title, duration, len(content), citation_count(content))
                 note("ok", f"Section ready in {duration:.0f}s: {clip(title)}")
                 advance = getattr(ui_manager, "advance", None)
                 if callable(advance):
                     advance(1, f"Completed section: {clip(title, 40)}")
-                return order, title, content, False
+                return order, title, content, section_urls, False
 
         results = await asyncio.gather(*[
-            generate_with_progress(order, title, task)
-            for order, title, task in tasks
+            generate_with_progress(order, title, task, numbers, urls)
+            for order, title, task, numbers, urls in tasks
         ], return_exceptions=False)
 
         failed = 0
-        for order, title, content, failed_section in sorted(results, key=lambda x: x[0]):
+        for order, title, content, section_urls, failed_section in sorted(results, key=lambda x: x[0]):
             failed += 1 if failed_section else 0
             section = ReportSection(
                 title=title,
                 content=content,
-                sources=[],  # Sources are inline in content
+                sources=section_urls,
                 order=order,
             )
             sections.append(section)
@@ -278,78 +336,143 @@ class ReportGeneratorAgent:
 
         return summary
     
+    @staticmethod
+    def _fallback_findings(
+        state: ResearchState,
+        theme_index: int,
+        theme_count: int,
+        limit: int = 10,
+    ) -> List:
+        """Interleave findings across themes that were given no mapping.
+
+        Theme-to-finding indices are model output and can be absent or
+        unusable. Reusing ``findings[:10]`` for every such theme makes the
+        sections repeat each other; a deterministic stride keeps them
+        distinct while ensuring every finding still has a home.
+        """
+        if not state.findings:
+            return []
+        stride = max(1, theme_count)
+        start = theme_index % len(state.findings)
+        return [
+            state.findings[index]
+            for index in range(start, len(state.findings), stride)
+        ][:limit]
+
     def _generate_gaps_section(self, state: ResearchState) -> str:
         """
         Generate section about uncertainties and knowledge gaps
         """
         if not state.gaps:
-            return "No significant knowledge gaps were identified during this research."
-        
-        content = "The following uncertainties and knowledge gaps were identified:\n\n"
-        
-        # Group gaps by severity
-        critical_gaps = [g for g in state.gaps if g.severity == "critical"]
-        moderate_gaps = [g for g in state.gaps if g.severity == "moderate"]
-        
-        if critical_gaps:
-            content += "CRITICAL GAPS\n\n"
-            for gap in critical_gaps:
-                content += f"- {gap.description}\n"
-                if gap.suggested_searches:
-                    content += f"  - Suggested research: {', '.join(gap.suggested_searches[:2])}\n"
+            content = "No significant knowledge gaps were identified during this research.\n"
+        else:
+            content = "The following uncertainties and knowledge gaps were identified.\n\n"
+
+            # Group gaps by severity
+            critical_gaps = [g for g in state.gaps if g.severity == "critical"]
+            moderate_gaps = [g for g in state.gaps if g.severity == "moderate"]
+
+            if critical_gaps:
+                content += "### Critical gaps\n\n"
+                for gap in critical_gaps:
+                    content += f"- {gap.description}\n"
+                    if gap.suggested_searches:
+                        content += f"  - Suggested research: {', '.join(gap.suggested_searches[:2])}\n"
+                content += "\n"
+
+            if moderate_gaps:
+                content += "### Moderate gaps\n\n"
+                for gap in moderate_gaps[:5]:  # Limit to 5
+                    content += f"- {gap.description}\n"
+                content += "\n"
+
+        cross = state.cross_reference if isinstance(state.cross_reference, dict) else {}
+
+        # Cross-question agreements were already paid for; surface them.
+        consensus = cross.get("consensus_points") or []
+        if consensus:
+            content += "### Points of agreement\n\n"
+            for point in consensus[:5]:
+                if isinstance(point, dict):
+                    text = str(point.get("point") or "").strip()
+                    confidence = point.get("confidence")
+                else:
+                    text = str(point).strip()
+                    confidence = None
+                if not text:
+                    continue
+                suffix = ""
+                if isinstance(confidence, (int, float)):
+                    suffix = f" (confidence {float(confidence):.0%})"
+                content += f"- {text}{suffix}\n"
             content += "\n"
-        
-        if moderate_gaps:
-            content += "MODERATE GAPS\n\n"
-            for gap in moderate_gaps[:5]:  # Limit to 5
-                content += f"- {gap.description}\n"
-            content += "\n"
-        
-        # Add contradictions found
+
+        # Contradictions come from two places: per-finding analysis and the
+        # later cross-reference pass. Normalise both to one bullet form.
         contradictions = []
         for finding in state.findings:
-            if finding.contradictions:
-                contradictions.extend(finding.contradictions)
-        
-        if contradictions:
-            content += "AREAS OF CONTRADICTION\n\n"
-            content += "The research revealed contradictions in the following areas:\n\n"
-            for contradiction in contradictions[:5]:
+            contradictions.extend(finding.contradictions or [])
+        for item in cross.get("contradictions") or []:
+            if isinstance(item, dict):
+                topic = str(item.get("topic") or "").strip()
+                viewpoint_a = str(item.get("viewpoint_a") or "").strip()
+                viewpoint_b = str(item.get("viewpoint_b") or "").strip()
+                if topic and viewpoint_a and viewpoint_b:
+                    contradictions.append(
+                        f"**{topic}**: {viewpoint_a} — {viewpoint_b}"
+                    )
+                elif topic:
+                    contradictions.append(topic)
+            elif str(item).strip():
+                contradictions.append(str(item).strip())
+
+        seen = set()
+        unique_contradictions = []
+        for contradiction in contradictions:
+            key = str(contradiction).strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                unique_contradictions.append(contradiction)
+
+        if unique_contradictions:
+            content += "### Areas of contradiction\n\n"
+            content += "The research revealed contradictions in the following areas.\n\n"
+            for contradiction in unique_contradictions[:5]:
                 content += f"- {contradiction}\n"
             content += "\n"
-        
+
+        reliability = str(cross.get("reliability_assessment") or "").strip()
+        if reliability:
+            content += "### Source reliability\n\n"
+            content += reliability + "\n\n"
+
         return content
     
-    def _generate_sources_section(self, state: ResearchState) -> str:
+    def _generate_sources_section(self, state: ResearchState, entries: list = None) -> str:
+        """Bibliography in the same numbering used by inline citations.
+
+        No heading here: _assemble_report writes the "Sources" heading.
         """
-        Generate sources section with all references
-        """
-        # Collect all unique sources
-        sources = {}
-        source_counter = 1
-        
-        for result in state.search_results:
-            if result.url not in sources:
-                sources[result.url] = {
-                    "number": source_counter,
-                    "title": result.title,
-                    "url": result.url,
-                    "category": result.category,
-                    "score": result.score
-                }
-                source_counter += 1
-        
-        # Sort by source number (numeric order)
-        sorted_sources = sorted(
-            sources.values(),
-            key=lambda x: x["number"]
-        )
-        # No heading here: _assemble_report writes the "SOURCES" title.
-        content = ""
-        for source in sorted_sources:
-            content += f"{source['number']}. {source['title']}\n    {source['url']}\n"
-        content += "\n"
-        return content
+        if entries is None:
+            _, entries = build_source_registry(state.search_results)
+
+        if not entries:
+            return "No sources were collected.\n"
+
+        lines = []
+        for source in entries:
+            title = source.title or source.url
+            confidence = source.category.replace("_", " ").title()
+            lines.append(f"{source.number}. [Source {source.number}] **{title}**")
+            lines.append(f"   <{source.url}>")
+            if source.published_date:
+                lines.append(f"   Published: {source.published_date}")
+            lines.append(
+                f"   {confidence} · evidence quality {source.quality:.2f} · "
+                f"search relevance {source.score:.2f}"
+            )
+            lines.append("")
+        return "\n".join(lines).rstrip() + "\n"
     
     def _assemble_report(
         self,
@@ -357,49 +480,53 @@ class ReportGeneratorAgent:
         executive_summary: str,
         sections: List[ReportSection],
         gaps_section: str,
-        sources_section: str
+        sources_section: str,
+        source_entries: list = None,
     ) -> str:
-        """
-        Assemble all components into final markdown report
-        """
+        """Assemble the components as one properly structured Markdown file."""
         from datetime import datetime
 
         model = getattr(self.llm, "model", "") or "unknown"
         generated = datetime.now().strftime("%Y-%m-%d %H:%M")
+        ordered_sections = sorted(sections, key=lambda section: section.order)
+        body_for_count = "\n".join(
+            [executive_summary, gaps_section]
+            + [section.content for section in ordered_sections]
+        )
         meta = "  ·  ".join([
-            f"Model: {model}",
+            f"Model: `{model}`",
             f"Iterations: {state.iteration_count}",
-            f"Sources: {len(state.search_results)}",
+            f"Unique sources: {len(source_entries or [])}",
+            f"Citations: {citation_count(body_for_count)}",
             f"Generated: {generated}",
         ])
-        report = f"""Research Report: {state.main_query}
 
-Generated by Veritas Deep Research Agent
+        report = f"""# Research Report: {state.main_query}
+
+*Generated by Veritas Deep Research Agent*
+
 {meta}
 
-════════════════════════════════════════════════════════════════════════════════
+> Inline citations use `[Source N]`, which resolves to the numbered entry under **Sources**.
 
-EXECUTIVE SUMMARY
+---
 
-{executive_summary}
+## Executive Summary
 
-════════════════════════════════════════════════════════════════════════════════
+{executive_summary.strip()}
 
 """
         
-        # Add main sections
-        for section in sections:
-            report += f"{section.title.upper()}\n\n"
-            report += section.content
-            report += "\n\n════════════════════════════════════════════════════════════════════════════════\n\n"
+        # Add main sections in theme order, with the assembler owning headings.
+        for section in ordered_sections:
+            report += f"---\n\n## {section.title.strip()}\n\n{section.content.strip()}\n\n"
         
         # Add gaps section
-        report += "UNCERTAINTIES & KNOWLEDGE GAPS\n\n"
-        report += gaps_section
-        report += "\n════════════════════════════════════════════════════════════════════════════════\n\n"
+        report += "---\n\n## Uncertainties and Knowledge Gaps\n\n"
+        report += gaps_section.strip() + "\n\n"
         
         # Add sources
-        report += "SOURCES\n\n"
-        report += sources_section
+        report += "---\n\n## Sources\n\n"
+        report += sources_section.strip() + "\n"
         
         return report

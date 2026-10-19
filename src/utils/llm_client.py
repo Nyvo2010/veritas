@@ -93,6 +93,7 @@ try:
         REPORT_SECTION_MAX_TOKENS,
         REPORT_SUMMARY_MAX_TOKENS,
         API_REQUEST_TIMEOUT,
+        ANALYSIS_CONTENT_CHARS,
     )
 except ImportError as e:
     raise ImportError("The 'config' module is missing or not found. Ensure it exists and is in the Python path.") from e
@@ -106,7 +107,7 @@ def _tolerant_loads(candidate: str) -> Dict:
     """
     try:
         return json.loads(candidate)
-    except json.JSONDecodeError as first_error:
+    except json.JSONDecodeError:
         pass
     try:
         return json.loads(candidate, strict=False)
@@ -737,6 +738,8 @@ Consider:
 - What information is missing TO FULLY ANSWER THIS QUESTION?
 - What follow-up questions arise WITHIN THIS TOPIC?
 - How confident are you in the answer TO THIS SPECIFIC QUESTION?
+- Weight high-quality sources over thin, promotional, or user-generated pages.
+  If only low-quality sources support a claim, say so and lower the confidence.
 
 Return JSON:
 {
@@ -745,18 +748,27 @@ Return JSON:
     "answer": "Best answer based on available info FOR THIS SPECIFIC QUESTION",
     "confidence": 0.0-1.0,
     "source_agreement": "high/medium/low",
+    "source_indices": [1, 3],
     "contradictions": ["list any contradictions found"],
     "gaps": ["list knowledge gaps DIRECTLY RELATED TO THIS QUESTION"],
     "follow_up_questions": ["questions that need more research WITHIN THIS TOPIC"],
     "needs_more_research": true/false,
     "reasoning": "Why you need/don't need more research FOR THIS SPECIFIC QUESTION"
-}"""
+}
 
-        # Format search results
+"source_indices" must be 1-based indices of the Search Results that directly
+support the answer. Do not list a source you did not use."""
+
+        # Format search results. The pipeline already selected the strongest
+        # subset; spend a real text budget on each one instead of reading only
+        # the opening paragraph.
         results_text = "\n\n".join([
             f"Source {i+1}: {r.get('title', 'No title')}\n"
             f"URL: {r.get('url', 'No URL')}\n"
-            f"Content: {r.get('content', 'No content')[:1000]}..."
+            f"Category: {r.get('category', 'general')} · "
+            f"evidence quality: {float(r.get('quality', 0.0)):.2f}"
+            + (f" · published: {r['published_date']}" if r.get('published_date') else "")
+            + f"\nContent: {(r.get('content') or 'No content')[:ANALYSIS_CONTENT_CHARS]}..."
             for i, r in enumerate(search_results[:10])
         ])
 
@@ -898,9 +910,18 @@ Write 1000-1800 words of original analysis that:
 Return only the section body; its heading is added automatically."""
 
 
+        def evidence_label(finding: Dict, index: int) -> str:
+            """Stable, report-wide source numbers supplied by the assembler."""
+            numbers = finding.get("source_numbers") or []
+            if numbers:
+                return "".join(f"[Source {int(number)}] " for number in numbers)
+            # Standalone callers (tests, other frontends) may not have a
+            # registry; fall back to local numbering for the prompt only.
+            return f"[Source {index + 1}] "
+
         findings_text = "\n\n".join([
-            f"[Source {i+1}] {f.get('content', '')[:600]}\n"
-            f"Confidence: {f.get('confidence', 0.5):.2f}"
+            f"{evidence_label(f, i)}{f.get('content', '')[:600]}\n"
+            f"Confidence: {float(f.get('confidence', 0.5)):.2f}"
             for i, f in enumerate(relevant_findings[:15])
         ])
 
@@ -922,7 +943,9 @@ STRUCTURE:
 5. Connect the points back to the broader research question
 
 Prioritise depth over breadth: reveal something specific and well-evidenced,
-not generic observations. Cite the evidence above as [Source N]."""
+not generic observations. Cite the evidence above as [Source N]. Use only the
+numbers shown in the evidence labels; when a finding carries several numbers,
+cite only the ones that actually support that sentence."""
 
         messages = [
             {"role": "system", "content": system_prompt},

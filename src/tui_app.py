@@ -57,7 +57,9 @@ from settings import (
 )
 from ui import theme, timings
 from runner_ui import QueueUI
+from utils import desktop
 from utils.llm_client import fetch_models
+from utils.sources import build_source_registry, citation_count
 from main import DeepResearchAgent
 
 
@@ -718,12 +720,16 @@ def worker(query: str, max_iter: int, toggles: dict) -> None:
         st = asyncio.run(agent.research(query, max_iterations=max_iter, verbose=False, ui=ui))
         saved = agent.save_report(st)
         duration = (st.end_time - st.start_time).total_seconds() if st.end_time else 0.0
+        _, source_entries = build_source_registry(st.search_results)
         state["result"] = {
             "ok": True,
             "duration": duration,
             "iterations": st.iteration_count,
-            "questions": len(st.completed_questions),
+            "questions": len(st.answered_questions()),
+            "questions_failed": len(st.failed_questions()),
             "searches": st.total_searches,
+            "sources": len(source_entries),
+            "citations": citation_count(st.final_report or ""),
             "findings": len(st.findings),
             "gaps": len(st.gaps),
             "report_len": len(st.final_report or ""),
@@ -879,12 +885,23 @@ def screen_menu() -> Box:
             go("settings")
         elif value == "logs":
             go("logs")
+        elif value == "report":
+            go("done")
         elif value == "quit":
             request_quit()
 
     items = [
         {"label": "New research", "value": "new", "subtitle": "Answer a question with deep web research"},
     ]
+    # Keep the result reachable after returning to the menu: opening or
+    # revealing the file should not require running the research again.
+    last_result = state.get("result") or {}
+    if last_result.get("saved"):
+        items.append({
+            "label": "Last report",
+            "value": "report",
+            "subtitle": "Stats, open in default app, show in file manager",
+        })
     # Only offer the log once there is one to read.
     entries = log_sig()
     if entries:
@@ -1069,30 +1086,69 @@ def save_lines(result: dict) -> list:
 
 
 def screen_done() -> Box:
+    """Result stats plus the actions a finished report actually enables."""
     result = state["result"] or {"ok": False, "error": "No result recorded."}
+    saved = str(result.get("saved") or "")
+
+    def activate(item) -> None:
+        action = item["value"]
+        if action == "menu":
+            go("menu")
+        elif action == "logs":
+            go("logs")
+        elif action == "open":
+            try:
+                desktop.open_in_default_app(saved)
+                clear_notice()
+            except Exception as e:  # noqa: BLE001 - shown to the user
+                set_notice("error", f"Could not open the report: {e}")
+        elif action == "reveal":
+            try:
+                desktop.reveal_in_file_manager(saved)
+                clear_notice()
+            except Exception as e:  # noqa: BLE001 - shown to the user
+                set_notice("error", f"Could not show the report: {e}")
+
+    # One line per action: the stats above already use the screen's budget.
+    items = []
+    if saved:
+        items.append({"label": "Open report", "value": "open"})
+        items.append({"label": "Show in file manager", "value": "reveal"})
+    if log_sig():
+        items.append({"label": "Activity log", "value": "logs"})
+    items.append({"label": "Main menu", "value": "menu"})
+    register_list("done", items, activate, visible=len(items))
+
     if result.get("ok"):
-        rows = kv_rows([
+        stats = [
             ("Duration", theme.format_duration(result.get("duration", 0))),
             ("Iterations", str(result.get("iterations", 0))),
-            ("Questions", str(result.get("questions", 0))),
+            ("Questions answered", str(result.get("questions", 0))),
             ("Searches", str(result.get("searches", 0))),
+            ("Sources", str(result.get("sources", 0))),
+            ("Citations", str(result.get("citations", 0))),
             ("Findings", str(result.get("findings", 0))),
             ("Gaps", str(result.get("gaps", 0))),
             ("Report", f"{result.get('report_len', 0):,} chars"),
-        ])
+        ]
+        if result.get("questions_failed"):
+            stats.insert(3, ("Questions failed", str(result["questions_failed"])))
+        rows = kv_rows(stats)
         return page(
-            panel("Research complete", *rows, *save_lines(result)),
+            panel("Research complete", *rows, *save_lines(result), gap(), *list_rows("done")),
             gap(),
-            footer=hint("Enter menu · l activity log"),
+            footer=hint("↑↓ move · Enter select · l log · Esc menu"),
         )
     return page(
         panel(
             "Research failed",
             Text(str(result.get("error", "Unknown error")), fg=DANGER),
             *save_lines(result),
+            gap(),
+            *list_rows("done"),
         ),
         gap(),
-        footer=hint("Enter menu · l activity log"),
+        footer=hint("↑↓ move · Enter select · l log · Esc menu"),
     )
 
 
@@ -1942,7 +1998,7 @@ def App():
         if key == "l" and s == "done" and log_sig():
             go("logs")
             return
-        if key in ("return", "enter") and s in ("done", "setup-done"):
+        if key in ("return", "enter") and s == "setup-done":
             go("menu")
             return
 

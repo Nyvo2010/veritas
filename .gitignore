@@ -45,6 +45,8 @@ htmlcov/
 
 # Agent / editor scratch
 .freebuff/
+AGENTS.md
+TODO.md
 
 # Logs
 *.log

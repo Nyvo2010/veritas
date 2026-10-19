@@ -58,8 +58,9 @@ def configure(force: bool = False) -> str:
         except OSError:
             pass
     except OSError:
-        # A read-only home should never stop the app from running.
-        handler = logging.StreamHandler(open(os.devnull, "w"))
+        # A read-only home should never stop the app from running. A null
+        # handler drops the records without holding a file descriptor open.
+        handler = logging.NullHandler()
 
     handler.setLevel(level)
     handler.setFormatter(logging.Formatter(_FORMAT, datefmt="%Y-%m-%d %H:%M:%S"))
