@@ -4,7 +4,7 @@ Notable changes per release. This project follows [Semantic Versioning](https://
 
 ## [1.0.1]
 
-- Single install: the distribution is `veritas-cli`; `pipx install veritas-cli`
+- Single install: the distribution is `veritas-ai`; `pipx install veritas-ai`
   now pulls the full TUI where opentui wheels exist (CPython 3.12/3.13) and the
   Rich CLI elsewhere, with no `[tui]` extra to choose.
 - `veritas --version` reports the installed version.
