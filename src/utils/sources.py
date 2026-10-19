@@ -382,6 +382,7 @@ class SourceEntry:
     quality: float
     score: float
     published_date: str = ""
+    analyzed: bool = False
 
 
 def build_source_registry(results: Iterable) -> Tuple[Dict[str, int], List[SourceEntry]]:
@@ -419,6 +420,7 @@ def build_source_registry(results: Iterable) -> Tuple[Dict[str, int], List[Sourc
             quality=round(_as_float(getattr(result, "quality", 0.0)) or quality_score(result), 3),
             score=round(_as_float(getattr(result, "score", 0.0)), 3),
             published_date=str(getattr(result, "published_date", None) or "").strip(),
+            analyzed=bool(getattr(result, "analyzed", False)),
         ))
 
     return numbers, entries

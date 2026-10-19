@@ -83,9 +83,19 @@ class AdaptiveDepthTests(unittest.TestCase):
     def test_plain_short_question_uses_the_cheap_depth(self):
         self.assertEqual(self._depth("What is the capital of France?"), "basic")
 
-    def test_high_priority_question_uses_advanced(self):
+    def test_priority_alone_does_not_buy_the_advanced_rate(self):
+        # Decomposition models rate most questions highly; treating priority
+        # as "needs advanced" made every search advanced.
         self.assertEqual(
-            self._depth("What is the capital of France?", priority=8), "advanced"
+            self._depth("What is the capital of France?", priority=10), "basic"
+        )
+
+    def test_planner_requested_advanced_depth_is_honoured(self):
+        question = SubQuestion(
+            id="q1", question="What is the capital of France?", search_depth="advanced"
+        )
+        self.assertEqual(
+            self.agent.adaptive_search_depth(question, 1, None), "advanced"
         )
 
     def test_long_multi_clause_question_uses_advanced(self):
@@ -134,8 +144,25 @@ class MalformedModelOutputTests(unittest.TestCase):
         questions = agent.decompose_main_query("a research question", state)
 
         self.assertEqual([q.priority for q in questions], [8, 5, 10])
+        # No search_depth in the payload leaves the choice to the policy.
+        self.assertEqual([q.search_depth for q in questions], [None, None, None])
         # Priorities now share one type, so the queue can be sorted.
         self.assertIsNotNone(state.get_next_question())
+
+    def test_planner_search_depth_is_kept(self):
+        payload = {"sub_questions": [
+            {"question": "Shallow?", "search_depth": "basic"},
+            {"question": "Deep?", "search_depth": "Advanced"},
+            {"question": "Garbage?", "search_depth": "deepest"},
+        ]}
+        state = ResearchState(main_query="q", category_toggles={})
+        agent = QueryAnalyzerAgent(_DecomposeLLM(payload))
+
+        questions = agent.decompose_main_query("a research question", state)
+
+        self.assertEqual(
+            [q.search_depth for q in questions], ["basic", "advanced", None]
+        )
 
     def test_non_dict_questions_are_skipped(self):
         payload = {"sub_questions": ["just a string", {"question": "Kept?"}]}

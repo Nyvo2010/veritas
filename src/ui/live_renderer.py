@@ -91,7 +91,7 @@ class LiveRenderer:
         self._layout.split_column(
             Layout(name="header", size=5),
             Layout(name="log", ratio=1),
-            Layout(name="progress", size=7),
+            Layout(name="progress", size=8),
         )
         self._live: Optional[Live] = None
 
@@ -257,14 +257,19 @@ class LiveRenderer:
             eta_str = theme.format_eta(eta)
         else:
             eta_str = "Complete" if self.done else "—"
-        # Same braille bar as the OpenTUI frontend: the particle clock is
+        # Same two-row wave as the OpenTUI frontend: the particle clock is
         # seconds since the run started, so no animation state is kept here.
-        particles = 0 if self.done else max(3, self.console.width // 12)
-        filled, track = theme.braille_bar(ratio, 40, elapsed * 11.0, particles)
+        particles = 0 if self.done else 20
+        (fill_top, fill_bottom), (track_top, track_bottom) = theme.braille_wave(
+            ratio, 40, elapsed * 11.0, particles
+        )
         text = Text()
-        text.append(filled, style=theme.PRIMARY)
-        text.append(track, style=theme.MUTED)
+        text.append(fill_top, style=theme.PRIMARY)
+        text.append(track_top, style=theme.MUTED)
         text.append(f" {ratio * 100:.1f}%", style=theme.SECONDARY)
+        text.append("\n")
+        text.append(fill_bottom, style=theme.PRIMARY)
+        text.append(track_bottom, style=theme.MUTED)
         text.append("\n")
         text.append("Step ", style=f"bold {theme.PRIMARY}")
         text.append(f"{self.completed_steps:.0f}/{self.total_steps}", style=theme.SECONDARY)

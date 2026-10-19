@@ -30,6 +30,8 @@ class SubQuestion:
     priority: int = 0  # Higher = more important
     depth: int = 0  # How many levels deep in the question tree
     answer: Optional[str] = None
+    # Depth the decomposition model asked for, when it supplied one.
+    search_depth: Optional[str] = None
 
 
 @dataclass
@@ -44,6 +46,7 @@ class SearchResult:
     question_id: Optional[str] = None
     quality: float = 0.0  # 0-1 evidence quality (see utils.sources)
     published_date: Optional[str] = None  # ISO-ish date when the source reports one
+    analyzed: bool = False  # whether the analysis model was shown this source
 
 
 @dataclass

@@ -335,7 +335,9 @@ class _ReportPipelineLLM:
 
         return run()
 
-    def generate_executive_summary(self, main_query, sections, key_findings):
+    def generate_executive_summary(self, main_query, sections, key_findings,
+                                   source_numbers=None):
+        self.summary_numbers = sorted(source_numbers or [])
         return "A summary that keeps a section citation [Source 1]."
 
 
@@ -358,6 +360,14 @@ class ReportCitationPipelineTests(unittest.IsolatedAsyncioTestCase):
                 score=0.8,
                 category="news",
             ),
+            SearchResult(
+                url="https://example.net/collected",
+                title="Quantization survey",
+                content="c" * 600,
+                score=0.7,
+                category="general",
+                analyzed=True,
+            ),
         ]
         state.findings = [KnowledgeFinding(
             content="Quantization trades accuracy for speed.",
@@ -374,9 +384,16 @@ class ReportCitationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("A supported claim [Source 1].", report)
         self.assertIn("A corroborated claim [Source 2][Source 1].", report)
         self.assertNotIn("Source 99", report)
-        # The summary may reuse a source the sections cited, but not invent one.
+        # The summary is told which numbers it may reuse (the ones the sections
+        # cited), and may not invent one beyond that list.
+        self.assertEqual(llm.summary_numbers, [1, 2])
         self.assertIn("A summary that keeps a section citation [Source 1].", report)
         self.assertIn("## Executive Summary", report)
+        # The bibliography says how far each source actually got, so it cannot
+        # read as evidence the text never used.
+        self.assertIn("Collected only — not analyzed", report)
+        self.assertIn("Analyzed — not cited in this report", report)
+        self.assertIn("Unique sources: 3 (2 cited)", report)
         self.assertIn("## Mechanism", report)
         self.assertIn("## Sources", report)
         self.assertIn("1. [Source 1] **Quantization paper**", report)
