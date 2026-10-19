@@ -35,10 +35,15 @@ before opening a pull request.
 
 ## Pull requests
 
+- Open pull requests against **`main`**. It is the only branch and carries the
+  next version; releases are cut from tags, not branches.
+- The `tests` checks must pass before a pull request can merge.
 - Keep the change focused; one concern per pull request.
 - Match the surrounding style; there is no formatter to run.
 - Describe what changed and why, and how you tested it.
 - Do not commit API keys, tokens, or anything from `~/.config/veritas`.
+
+Maintainers: see [RELEASING.md](RELEASING.md) for how a version is shipped.
 
 By contributing you agree that your work is licensed under the MIT License
 (see [LICENSE](LICENSE)).
