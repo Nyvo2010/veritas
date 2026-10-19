@@ -29,7 +29,7 @@ same program with the same features. Either way it is one install command.
 `veritas` on your PATH, on macOS, Linux and Windows:
 
 ```bash
-pipx install veritas-ai
+pipx install veritas-research
 veritas
 ```
 

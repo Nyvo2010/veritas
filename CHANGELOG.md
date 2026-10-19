@@ -7,7 +7,7 @@ Notable changes per release. This project follows [Semantic Versioning](https://
 - First public release: iterative web research (Tavily) driven by any
   OpenAI-compatible endpoint, with a keyboard-driven TUI and a Rich CLI,
   a setup wizard, and Markdown report output.
-- Single install: the distribution is `veritas-ai`; `pipx install veritas-ai`
+- Single install: the distribution is `veritas-research`; `pipx install veritas-research`
   pulls the full TUI where opentui wheels exist (CPython 3.12/3.13) and the
   Rich CLI elsewhere — no `[tui]` extra to choose.
 - `veritas --version` reports the installed version.
