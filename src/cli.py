@@ -459,7 +459,7 @@ def _version() -> str:
         from importlib.metadata import PackageNotFoundError, version
     except ImportError:  # pragma: no cover - Python < 3.8
         return "unknown"
-    for name in ("veritas-ai", "veritas-cli", "veritas"):
+    for name in ("veritas-research", "veritas"):
         try:
             return version(name)
         except PackageNotFoundError:
