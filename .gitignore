@@ -6,7 +6,7 @@
 .Python
 
 # Package build metadata (pip install -e . leaves this)
-veritas.egg-info/
+veritas_research.egg-info/
 
 # Virtual Environment
 .env

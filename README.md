@@ -2,6 +2,7 @@
 
 <p align="center">
   <a href="https://github.com/Nyvo2010/veritas/actions/workflows/tests.yml"><img src="https://github.com/Nyvo2010/veritas/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
+  <a href="https://pypi.org/project/veritas-research/"><img src="https://img.shields.io/pypi/v/veritas-research.svg" alt="PyPI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="python 3.12+">
 </p>
@@ -177,7 +178,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow,
 
 - an npm wrapper so `npx veritas` works for people without Python
 - test coverage beyond the UI primitives
-- screenshots in this README
 
 ## License
 
