@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "veritas-cli"
+name = "veritas-ai"
 version = "1.0.1"
 description = "Veritas Deep Research Agent - deep, iterative web research with a live terminal UI"
 readme = "README.md"

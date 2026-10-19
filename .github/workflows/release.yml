@@ -8,7 +8,7 @@ name: release
 # PYPI_PUBLISH = true (Settings → Secrets and variables → Actions → Variables),
 # then do EITHER of:
 #   - Trusted Publishing (no secret): on PyPI add a pending publisher for
-#     veritas-cli with owner Nyvo2010, repo veritas, workflow release.yml,
+#     veritas-ai with owner Nyvo2010, repo veritas, workflow release.yml,
 #     environment pypi; or
 #   - a classic token: add a repository secret PYPI_API_TOKEN.
 on:
@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/veritas-cli
+      url: https://pypi.org/p/veritas-ai
     permissions:
       id-token: write
     steps:

@@ -4,7 +4,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Nyvo2010/veritas/main/install.sh | sh
 #
-# Prefer pipx? `pipx install veritas-cli` (see the README).
+# Prefer pipx? `pipx install veritas-ai` (see the README).
 #
 # From a checkout, just run ./install.sh (it installs that working tree).
 #
