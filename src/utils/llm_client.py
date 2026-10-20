@@ -799,7 +799,7 @@ use."""
         """
         system_prompt = """You are an expert at organizing research findings into SPECIFIC, DISTINCT themes that avoid redundancy.
 
-Analyze all findings and identify 6-10 SHARPLY FOCUSED themes for a comprehensive report.
+Analyze all findings and give each one a SHARPLY FOCUSED theme title and description. The report writes one section per finding, so do not invent themes for findings that do not exist, and do not merge several findings into one theme.
 
 CRITICAL REQUIREMENTS:
 - Each theme must be SPECIFIC and DISTINCT - no overlap between themes
@@ -813,29 +813,31 @@ Return JSON:
     "themes": [
         {
             "title": "Specific, unique theme focusing on a particular mechanism or insight",
-            "description": "Detailed description emphasizing what makes this theme DISTINCT from others (100+ words)",
-            "importance": 0-10,
-            "related_findings": [0, 1, 2],
-            "key_points": ["highly specific point 1", "highly specific point 2", "highly specific point 3"],
-            "sub_topics": ["specific sub-topic 1", "specific sub-topic 2"],
-            "unique_angle": "What makes this theme different from others"
+            "description": "What this theme covers, and what makes it DISTINCT from the others (40-80 words)",
+            "related_finding_ids": ["F1", "F3"]
         }
-    ],
-    "narrative_flow": "How themes build on each other logically without repeating information",
-    "cross_cutting_issues": ["issues that connect multiple themes in specific ways"]
+    ]
 }
 
 AVOID: Generic themes like "Overview of X", "Impact on Y", "Introduction to Z"
 PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
 
+        # Only the three fields the report uses are requested; the old prompt
+        # also asked for key_points, sub_topics, unique_angle and two summary
+        # strings that nothing read, which cost output tokens on every run.
         findings_text = "\n\n".join([
-            f"Finding {i}: {f.get('content', '')[:600]}"
+            f"{f.get('id') or 'F' + str(i + 1)}: {f.get('content', '')[:600]}"
             for i, f in enumerate(all_findings)
         ])
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Findings to analyze:\n\n{findings_text}\n\nIdentify 6-10 SPECIFIC, NON-OVERLAPPING themes. Focus on unique mechanisms, dynamics, or insights."}
+            {"role": "user", "content": (
+                f"Findings to analyze (each is labelled with its id):\n\n{findings_text}\n\n"
+                "Give every finding its own SPECIFIC, NON-OVERLAPPING theme. Focus on unique "
+                "mechanisms, dynamics, or insights. In related_finding_ids, list "
+                "only the ids (e.g. F2) of findings that theme is actually about."
+            )}
         ]
 
         return self.chat_json(messages, max_tokens=3000)

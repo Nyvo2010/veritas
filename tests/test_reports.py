@@ -14,6 +14,7 @@ import tempfile
 import threading
 import unittest
 from datetime import datetime
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
@@ -64,6 +65,49 @@ class SaveReportTests(unittest.TestCase):
         self.assertEqual(self.agent.save_error, "")
         with open(path, encoding="utf-8") as handle:
             self.assertEqual(handle.read(), state.final_report)
+
+    def test_no_temporary_file_is_left_behind(self):
+        state = make_state()
+        state.final_report = "x"
+        self.agent.save_report(state)
+        self.assertEqual(
+            [name for name in os.listdir(self.tmp) if name.startswith(".report-")],
+            [],
+        )
+
+    def test_a_write_failure_leaves_the_previous_report_intact(self):
+        state = make_state()
+        state.final_report = "# First\n"
+        path = self.agent.save_report(state, filename=os.path.join(self.tmp, "report.md"))
+        with open(path, encoding="utf-8") as handle:
+            original = handle.read()
+
+        state.final_report = "# Second\n"
+        with mock.patch("main.os.replace", side_effect=OSError("disk full")):
+            result = self.agent.save_report(state, filename=path)
+
+        self.assertIsNone(result)
+        self.assertIn("cannot write", self.agent.save_error)
+        with open(path, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), original, "truncated the previous report")
+        self.assertEqual(
+            [name for name in os.listdir(self.tmp) if name.startswith(".report-")],
+            [],
+        )
+
+    @unittest.skipIf(os.name == "nt", "POSIX permissions only")
+    def test_replacing_a_report_keeps_its_permissions(self):
+        state = make_state()
+        state.final_report = "one"
+        path = self.agent.save_report(state, filename=os.path.join(self.tmp, "r.md"))
+        os.chmod(path, 0o640)
+
+        state.final_report = "two"
+        self.agent.save_report(state, filename=path)
+
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o640)
+        with open(path, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "two")
 
     def test_filename_is_derived_from_the_query(self):
         state = make_state("What about GPUs / NPUs: 2026?")
@@ -240,6 +284,40 @@ class SectionOrderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([s.title for s in sections], ["Alpha", "Beta", "Gamma"])
         self.assertEqual([s.order for s in sections], [0, 1, 2])
         self.assertEqual([s.content for s in sections], ["BODY:Alpha", "BODY:Beta", "BODY:Gamma"])
+
+    async def test_theme_titles_follow_finding_ids_not_positions(self):
+        state = make_state()
+        for i in range(2):
+            state.findings.append(KnowledgeFinding(
+                content=f"f{i}", sources=[], confidence=0.9, question_id=f"q{i}"
+            ))
+        themes = {"themes": [
+            {"title": "Second theme", "related_finding_ids": ["F2"]},
+            {"title": "First theme", "related_finding_ids": ["f1"]},
+        ]}
+        agent = ReportGeneratorAgent(_FakeLLM({"First theme": 0, "Second theme": 0}))
+
+        sections, failed = await agent._generate_sections_parallel(
+            state, themes, "comprehensive"
+        )
+
+        self.assertEqual(failed, 0)
+        self.assertEqual([s.title for s in sections], ["First theme", "Second theme"])
+
+    async def test_an_unknown_finding_id_falls_back_to_the_question(self):
+        state = make_state()
+        for i in range(1):
+            state.findings.append(KnowledgeFinding(
+                content="only", sources=[], confidence=0.9, question_id="q1"
+            ))
+        themes = {"themes": [{"title": "Mislabelled", "related_finding_ids": ["F9"]}]}
+        agent = ReportGeneratorAgent(_FakeLLM({"Section 1": 0}))
+
+        sections, _ = await agent._generate_sections_parallel(
+            state, themes, "comprehensive"
+        )
+
+        self.assertEqual([s.title for s in sections], ["Section 1"])
 
     async def test_a_failed_section_is_counted_but_keeps_its_slot(self):
         themes = [

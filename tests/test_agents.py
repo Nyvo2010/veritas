@@ -309,6 +309,22 @@ class MalformedAnalysisTests(unittest.TestCase):
         self.assertEqual(finding.confidence, 0.5)
 
 
+class SearchFailureCountingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_failed_search_is_still_counted(self):
+        class _BrokenTavily:
+            def search(self, **kwargs):
+                raise RuntimeError("network down")
+
+        state = ResearchState(main_query="q", category_toggles={})
+        agent = SearchAgent(_BrokenTavily(), llm_client=None)
+        question = SubQuestion(id="q1", question="What is it?")
+
+        results = await agent.execute_search(question, state)
+
+        self.assertEqual(results, [])
+        self.assertEqual(state.total_searches, 1)
+
+
 class SynthesisCitationTests(unittest.TestCase):
     def test_finding_sources_follow_the_models_cited_indices(self):
         state = _finding_state()
@@ -318,19 +334,27 @@ class SynthesisCitationTests(unittest.TestCase):
         agent.analyze_results(question, _search_results(), state)
 
         self.assertEqual(state.findings[0].sources, ["https://two.example"])
+
+    def test_no_indices_means_no_claimed_sources(self):
+        state = _finding_state()
+        question = state.get_question_by_id("q1")
+
+        SynthesisAgent(_AnalysisLLM([])).analyze_results(
+            question, _search_results(), state
+        )
+
+        self.assertEqual(state.findings[0].sources, [],
+                         "the first results must not be presented as support")
         self.assertEqual(state.findings[0].confidence, 0.9)
 
-    def test_missing_or_invalid_indices_fall_back_to_the_result_list(self):
+    def test_invalid_indices_do_not_claim_sources(self):
         state = _finding_state()
         question = state.get_question_by_id("q1")
         agent = SynthesisAgent(_AnalysisLLM(["not-a-number", 99]))
 
         agent.analyze_results(question, _search_results(), state)
 
-        self.assertEqual(
-            state.findings[0].sources,
-            ["https://one.example", "https://two.example"],
-        )
+        self.assertEqual(state.findings[0].sources, [])
 
 
 if __name__ == "__main__":

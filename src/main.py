@@ -9,6 +9,7 @@ from datetime import datetime
 import logging
 import sys
 import os
+import tempfile
 import time
 import traceback
 
@@ -605,9 +606,34 @@ class DeepResearchAgent:
                     log.error("save failed: %s", self.save_error)
                     return None
 
+        # Write through a private temporary file and rename it into place: a
+        # crash mid-write can never leave a truncated report, and an existing
+        # file is replaced only once the new one is complete.
         try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write(body)
+            directory = os.path.dirname(os.path.abspath(filename)) or "."
+            try:
+                mode = os.stat(filename).st_mode & 0o777
+            except OSError:
+                mode = 0o644
+            handle, temporary = tempfile.mkstemp(
+                prefix=".report-", suffix=".md", dir=directory
+            )
+            try:
+                with os.fdopen(handle, "w", encoding="utf-8") as f:
+                    f.write(body)
+                # mkstemp is owner-only; a report is user content, so match the
+                # file being replaced (or the usual default for a new one).
+                try:
+                    os.chmod(temporary, mode)
+                except OSError:
+                    pass
+                os.replace(temporary, filename)
+            except BaseException:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
         except OSError as e:
             self.save_error = f"cannot write {filename}: {e}"
             log.error("save failed: %s", self.save_error)
