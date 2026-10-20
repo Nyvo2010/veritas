@@ -15,11 +15,13 @@ from typing import List, Dict
 from models.research_state import ResearchState, ReportSection
 from utils.llm_client import LLMClient
 from utils.sources import (
+    SourceEntry,
     build_source_registry,
     citation_count,
     cited_numbers,
     normalize_citations,
     number_for,
+    renumber_citations,
 )
 from utils.text import clip
 from config import MAX_PARALLEL_SECTIONS
@@ -105,7 +107,7 @@ class ReportGeneratorAgent:
         # traceable, without letting it invent a source the body never used.
         summary_numbers = cited_numbers("\n".join(s.content for s in sections))
         executive_summary = await self._generate_executive_summary(
-            state, sections, summary_numbers
+            state, summary_numbers, source_numbers
         )
         executive_summary = normalize_citations(
             executive_summary,
@@ -119,24 +121,10 @@ class ReportGeneratorAgent:
         # Step 4: Generate uncertainties and gaps section
         gaps_section = self._generate_gaps_section(state)
 
-        # Which sources the body actually cites. Recomputed here (rather than
-        # inside the sources section) because the bibliography has to say what
-        # the text did, not what the search engine returned.
-        cited = cited_numbers("\n".join(
-            [executive_summary, gaps_section] + [s.content for s in sections]
-        ))
-
-        # Step 5: Generate sources section
-        sources_section = self._generate_sources_section(state, source_entries, cited)
-
-        # Step 6: Assemble final report
+        # Step 5: Assemble the report. The bibliography is derived from the
+        # body's citations after assembly, so it can never list unused pages.
         final_report = self._assemble_report(
-            state,
-            executive_summary,
-            sections,
-            gaps_section,
-            sources_section,
-            source_entries,
+            state, executive_summary, sections, gaps_section, source_entries
         )
         if advance:
             advance(1, "Report assembled")
@@ -190,13 +178,25 @@ class ReportGeneratorAgent:
         """
         tasks = []
         theme_list = themes.get("themes") if isinstance(themes, dict) else None
-        if not theme_list:
-            # The model occasionally omits themes; never fail the whole report.
-            theme_list = [{
-                "title": "Analysis",
-                "description": f"Comprehensive analysis of: {state.main_query}",
-                "related_findings": [],
-            }]
+        if not isinstance(theme_list, list):
+            theme_list = []
+
+        # Themes used to reuse findings, which turned three answers into seven
+        # sections citing the same sources over and over. One section per
+        # finding keeps each section's evidence its own; the themes only supply
+        # a title and a focus for the finding they mention first.
+        titles = {}
+        descriptions = {}
+        for theme in theme_list:
+            if not isinstance(theme, dict):
+                continue
+            raw_indices = theme.get("related_findings") or []
+            if not isinstance(raw_indices, list):
+                continue
+            for idx in (int(x) for x in raw_indices if str(x).isdigit()):
+                if 0 <= idx < len(state.findings):
+                    titles.setdefault(idx, theme.get("title"))
+                    descriptions.setdefault(idx, theme.get("description"))
 
         def finding_numbers(finding) -> list:
             """Report-wide numbers for a finding's supporting URLs."""
@@ -207,26 +207,19 @@ class ReportGeneratorAgent:
                     numbers.append(number)
             return numbers
 
-        for i, theme in enumerate(theme_list):
-            # Get findings related to this theme. Indices are model output and
-            # can arrive as strings, a bare number, or not at all.
-            raw_indices = theme.get('related_findings') or []
-            if not isinstance(raw_indices, list):
-                raw_indices = []
-            related_indices = [
-                int(idx) for idx in raw_indices if str(idx).isdigit()
-            ]
-            mapped_findings = [
-                state.findings[idx]
-                for idx in related_indices if idx < len(state.findings)
-            ]
-
-            # If the model mapped no findings, spread the evidence across the
-            # themes instead of handing every section the same first ten.
-            if not mapped_findings:
-                mapped_findings = self._fallback_findings(
-                    state, i, len(theme_list)
-                )
+        used_titles = set()
+        for i, finding in enumerate(state.findings):
+            question = (
+                state.get_question_by_id(finding.question_id)
+                if finding.question_id else None
+            )
+            fallback_title = question.question if question else f"Section {i + 1}"
+            title = titles.get(i) or fallback_title
+            if title in used_titles:
+                title = fallback_title
+            used_titles.add(title)
+            description = descriptions.get(i) or title
+            mapped_findings = [finding]
 
             relevant_findings = [
                 {
@@ -241,23 +234,33 @@ class ReportGeneratorAgent:
                 url for f in mapped_findings for url in f.sources
                 if number_for(url, source_numbers or {})
             ))
-            section_numbers = {
+            # Evidence the section may cite: the finding's own sources plus the
+            # pages read for the same questions that the finding never quoted.
+            # Without the extras a one-source finding yields a one-source
+            # section, no matter what the prompt asks for.
+            evidence_sources = self._evidence_sources(
+                state, mapped_findings, source_numbers
+            )
+            allowed_numbers = {
                 number
-                for finding in relevant_findings
-                for number in finding.get("source_numbers", [])
-            }
-            
-            # Create async task
-            title = theme.get("title") or f"Section {i + 1}"
-            description = theme.get("description") or title
+                for entry in relevant_findings
+                for number in entry.get("source_numbers", [])
+            } | {source["number"] for source in evidence_sources}
+            log.debug(
+                "section %r evidence: %s findings, %s sources, numbers=%s",
+                title, len(relevant_findings), len(evidence_sources),
+                sorted(allowed_numbers),
+            )
+
             task = self.llm.generate_section_async(
                 section_title=title,
                 theme_description=description,
                 relevant_findings=relevant_findings,
                 main_query=state.main_query,
-                style=style
+                style=style,
+                evidence_sources=evidence_sources,
             )
-            tasks.append((i, title, task, section_numbers, section_urls))
+            tasks.append((i, title, task, allowed_numbers, section_urls))
         
         # Execute tasks with concurrency limit
         sections = []
@@ -324,51 +327,108 @@ class ReportGeneratorAgent:
     async def _generate_executive_summary(
         self,
         state: ResearchState,
-        sections: List[ReportSection],
-        source_numbers: set = None,
+        allowed_numbers: set = None,
+        registry: dict = None,
     ) -> str:
         """
-        Generate executive summary after all sections are complete
+        Generate executive summary once all sections are complete.
+
+        Written from the findings rather than the section prose: feeding the
+        section openings in made the model echo them back as the summary.
+        ``allowed_numbers`` is what the sections cited; ``registry`` maps URLs
+        to report-wide numbers so each finding can say where it came from.
         """
-        section_contents = [s.content for s in sections]
-        
-        key_findings = [
-            f.content[:200] + "..."
-            for f in sorted(state.findings, key=lambda x: x.confidence, reverse=True)[:10]
-        ]
+        # Full-enough findings for a 600-900 word summary. The source numbers
+        # travel with them, or the summary has nothing to cite.
+        key_findings = []
+        for finding in sorted(state.findings, key=lambda x: x.confidence, reverse=True)[:10]:
+            numbers = []
+            for url in finding.sources:
+                number = number_for(url, registry or {})
+                if number and number not in numbers:
+                    numbers.append(number)
+            label = "".join(f"[Source {number}]" for number in numbers)
+            key_findings.append(clip(finding.content, 400) + (f" {label}" if label else ""))
         
         summary = await asyncio.to_thread(
             self.llm.generate_executive_summary,
             state.main_query,
-            section_contents,
             key_findings,
-            source_numbers,
+            allowed_numbers,
         )
 
         return summary
     
     @staticmethod
-    def _fallback_findings(
+    def _evidence_sources(
         state: ResearchState,
-        theme_index: int,
-        theme_count: int,
-        limit: int = 10,
-    ) -> List:
-        """Interleave findings across themes that were given no mapping.
+        findings: List,
+        source_numbers: dict,
+        limit: int = 6,
+        excerpt_chars: int = 900,
+    ) -> List[Dict]:
+        """Numbered page excerpts for one section, the finding's own first.
 
-        Theme-to-finding indices are model output and can be absent or
-        unusable. Reusing ``findings[:10]`` for every such theme makes the
-        sections repeat each other; a deterministic stride keeps them
-        distinct while ensuring every finding still has a home.
+        A finding records which pages supported it as a block of numbers but
+        not the text behind each number, so a model handed only the block
+        pastes it onto sentence after sentence. One excerpt per number gives
+        the model something to match a claim against; the rest of the list is
+        pages the analysis read for the same questions but never quoted.
         """
-        if not state.findings:
-            return []
-        stride = max(1, theme_count)
-        start = theme_index % len(state.findings)
-        return [
-            state.findings[index]
-            for index in range(start, len(state.findings), stride)
-        ][:limit]
+        question_ids = {
+            finding.question_id for finding in findings if finding.question_id
+        }
+        own_numbers = []
+        for finding in findings:
+            for url in finding.sources:
+                number = number_for(url, source_numbers or {})
+                if number and number not in own_numbers:
+                    own_numbers.append(number)
+
+        by_number = {}
+        for result in state.search_results:
+            number = number_for(result.url, source_numbers or {})
+            if number and number not in by_number:
+                by_number[number] = result
+
+        selected = []
+        seen_text = set()
+
+        def take(number: int, result) -> bool:
+            text = (result.full_content or result.content or "").strip()[:excerpt_chars]
+            if not text or text in seen_text:
+                return False
+            seen_text.add(text)
+            selected.append({
+                "number": number,
+                "title": result.title or result.url,
+                "content": text,
+            })
+            return len(selected) >= limit
+
+        for number in sorted(own_numbers):
+            result = by_number.get(number)
+            if result is not None and take(number, result):
+                return selected
+
+        extras = [
+            (number, result)
+            for number, result in by_number.items()
+            if number not in own_numbers
+            and getattr(result, "analyzed", False)
+            and (not question_ids or result.question_id in question_ids)
+        ]
+        extras.sort(
+            key=lambda item: (
+                getattr(item[1], "quality", 0.0),
+                getattr(item[1], "score", 0.0),
+            ),
+            reverse=True,
+        )
+        for number, result in extras:
+            if take(number, result):
+                break
+        return selected
 
     def _generate_gaps_section(self, state: ResearchState) -> str:
         """
@@ -459,26 +519,15 @@ class ReportGeneratorAgent:
 
         return content
     
-    def _generate_sources_section(
-        self,
-        state: ResearchState,
-        entries: list = None,
-        cited: set = None,
-    ) -> str:
-        """Bibliography in the same numbering used by inline citations.
+    def _render_sources(self, entries: List[SourceEntry], reviewed: int = 0) -> str:
+        """Reference list for exactly the sources the body cites.
 
-        Every entry is labelled with how far it actually got: cited in the
-        body, analyzed but unused, or only collected. Without that, a long
-        bibliography reads as evidence it never was.
-
-        No heading here: _assemble_report writes the "Sources" heading.
+        A bibliography lists the works the text refers to. Pages that were
+        collected or analysed but never used are summarised in one closing
+        note instead of padding the list with unused entries.
         """
-        if entries is None:
-            _, entries = build_source_registry(state.search_results)
-        cited = cited or set()
-
         if not entries:
-            return "No sources were collected.\n"
+            return "No sources were cited in this report.\n"
 
         lines = []
         for source in entries:
@@ -492,11 +541,14 @@ class ReportGeneratorAgent:
                 f"   {confidence} · evidence quality {source.quality:.2f} · "
                 f"search relevance {source.score:.2f}"
             )
-            if not source.analyzed:
-                lines.append("   Collected only — not analyzed")
-            elif source.number not in cited:
-                lines.append("   Analyzed — not cited in this report")
             lines.append("")
+
+        extra = max(0, reviewed - len(entries))
+        if extra:
+            noun = "source was" if extra == 1 else "sources were"
+            lines.append(
+                f"*{extra} additional {noun} reviewed but not cited in this report.*"
+            )
         return "\n".join(lines).rstrip() + "\n"
     
     def _assemble_report(
@@ -505,7 +557,6 @@ class ReportGeneratorAgent:
         executive_summary: str,
         sections: List[ReportSection],
         gaps_section: str,
-        sources_section: str,
         source_entries: list = None,
     ) -> str:
         """Assemble the components as one properly structured Markdown file."""
@@ -519,10 +570,11 @@ class ReportGeneratorAgent:
             + [section.content for section in ordered_sections]
         )
         cited = cited_numbers(body_for_count)
+        reviewed = len(source_entries or [])
         meta = "  ·  ".join([
             f"Model: `{model}`",
             f"Iterations: {state.iteration_count}",
-            f"Unique sources: {len(source_entries or [])} ({len(cited)} cited)",
+            f"Sources: {len(cited)} cited of {reviewed} reviewed",
             f"Citations: {citation_count(body_for_count)}",
             f"Generated: {generated}",
         ])
@@ -550,9 +602,12 @@ class ReportGeneratorAgent:
         # Add gaps section
         report += "---\n\n## Uncertainties and Knowledge Gaps\n\n"
         report += gaps_section.strip() + "\n\n"
-        
-        # Add sources
+
+        # The bibliography lists what the body actually cites, renumbered from
+        # 1 so the reference list has no gaps and no unused padding.
+        report, cited_entries = renumber_citations(report, source_entries or [])
+
         report += "---\n\n## Sources\n\n"
-        report += sources_section.strip() + "\n"
+        report += self._render_sources(cited_entries, reviewed).strip() + "\n"
         
         return report

@@ -106,80 +106,69 @@ class JsonSalvageTests(unittest.TestCase):
 
 
 
-class BrailleWaveTests(unittest.TestCase):
-    """The two-row wave is the progress bar on both frontends."""
+class BrailleBarTests(unittest.TestCase):
+    """The one-row progress bar: solid static fill, animated particle track."""
+
+    SOLID = chr(BRAILLE_BLOCK + 0xFF)
+    BLANK = chr(BRAILLE_BLOCK)
 
     def _parts(self, ratio, width, phase=0.0, particles=0):
-        (fill_top, fill_bottom), (track_top, track_bottom) = theme.braille_wave(
-            ratio, width, phase=phase, particles=particles
-        )
-        return fill_top, fill_bottom, track_top, track_bottom
+        return theme.braille_bar(ratio, width, phase=phase, particles=particles)
 
-    def test_each_line_is_exactly_width_cells(self):
+    def test_fill_plus_track_is_exactly_width_cells(self):
         for width in (8, 24, 40, 97):
             for ratio in (0.0, 0.13, 0.5, 0.87, 1.0):
-                top, bottom, track_top, track_bottom = self._parts(
-                    ratio, width, phase=3.0, particles=20
-                )
-                self.assertEqual(len(top) + len(track_top), width,
-                                 f"ratio={ratio} width={width}")
-                self.assertEqual(len(bottom) + len(track_bottom), width,
+                fill, track = self._parts(ratio, width, phase=3.0, particles=20)
+                self.assertEqual(len(fill) + len(track), width,
                                  f"ratio={ratio} width={width}")
 
     def test_every_character_is_braille(self):
-        for row in self._parts(0.42, 60, phase=11.0, particles=24):
-            for char in row:
-                self.assertGreaterEqual(ord(char), BRAILLE_BLOCK)
-                self.assertLessEqual(ord(char), BRAILLE_BLOCK + 0xFF)
+        fill, track = self._parts(0.42, 60, phase=11.0, particles=24)
+        for char in fill + track:
+            self.assertGreaterEqual(ord(char), BRAILLE_BLOCK)
+            self.assertLessEqual(ord(char), BRAILLE_BLOCK + 0xFF)
+
+    def test_the_filled_part_is_solid_and_never_animates(self):
+        fill, _ = self._parts(0.37, 40, phase=9.0, particles=20)
+        self.assertEqual(fill, self.SOLID * 15, "fill must be one gap-free block")
+        for phase in (0.0, 37.0, 400.0):
+            self.assertEqual(self._parts(0.37, 40, phase=phase)[0], fill)
 
     def test_fill_grows_with_progress(self):
-        previous = 0
+        previous = -1
         for step in range(11):
-            top, _, _, _ = self._parts(step / 10, 40)
-            filled = sum(1 for char in top if ord(char) != BRAILLE_BLOCK)
-            self.assertGreaterEqual(filled, previous)
-            previous = filled
-        top, bottom, track_top, track_bottom = self._parts(1.0, 40)
-        self.assertEqual(len(top), 40)
-        self.assertEqual(track_top + track_bottom, "")
-
-    def test_the_surface_ripples(self):
-        top, _, _, _ = self._parts(1.0, 60, phase=4.0)
-        self.assertGreater(len(set(top)), 1, "a flat top would be a single mask")
+            fill, _ = self._parts(step / 10, 40)
+            self.assertEqual(len(fill), 4 * step)
+            self.assertGreaterEqual(len(fill), previous)
+            previous = len(fill)
+        self.assertEqual(self._parts(1.0, 40)[1], "")
 
     def test_ratio_is_clamped(self):
-        blank = chr(BRAILLE_BLOCK)
-        top, bottom, track_top, track_bottom = self._parts(-5, 12)
-        self.assertEqual(top + track_top, blank * 12)
-        self.assertEqual(bottom + track_bottom, blank * 12)
-        top, _, track_top, track_bottom = self._parts(9.9, 12)
-        self.assertEqual(track_top + track_bottom, "")
-        self.assertNotEqual(set(top), {blank})
-
-    def test_particles_never_change_the_filled_part(self):
-        for phase in range(0, 400, 7):
-            plain = self._parts(0.5, 40, phase=phase, particles=0)
-            busy = self._parts(0.5, 40, phase=phase, particles=36)
-            self.assertEqual(plain[0], busy[0], "particles leaked into the fill")
-            self.assertEqual(plain[1], busy[1], "particles leaked into the fill")
+        fill, track = self._parts(-5, 12)
+        self.assertEqual((fill, track), ("", self.BLANK * 12))
+        fill, track = self._parts(9.9, 12)
+        self.assertEqual((fill, track), (self.SOLID * 12, ""))
 
     def test_particles_add_dots_to_the_track(self):
-        blank = chr(BRAILLE_BLOCK)
-        _, _, plain_top, plain_bottom = self._parts(0.0, 60, phase=0.0)
-        _, _, dotted_top, dotted_bottom = self._parts(0.0, 60, phase=5.0, particles=20)
-        self.assertEqual(set(plain_top + plain_bottom), {blank})
-        self.assertTrue(any(c != blank for c in dotted_top + dotted_bottom))
+        self.assertEqual(self._parts(0.0, 60, phase=0.0)[1], self.BLANK * 60)
+        self.assertNotEqual(self._parts(0.0, 60, phase=5.0, particles=20)[1],
+                            self.BLANK * 60)
+
+    def test_particles_never_touch_the_fill(self):
+        for phase in range(0, 400, 7):
+            self.assertEqual(self._parts(0.5, 40, phase=phase)[0],
+                             self._parts(0.5, 40, phase=phase, particles=36)[0])
 
     def test_more_particles_fill_more_of_the_track(self):
         def dots(count):
-            _, _, top, bottom = self._parts(0.0, 60, phase=9.0, particles=count)
-            return sum(1 for c in top + bottom if ord(c) != BRAILLE_BLOCK)
+            track = self._parts(0.0, 60, phase=9.0, particles=count)[1]
+            return sum(1 for c in track if ord(c) != BRAILLE_BLOCK)
 
         self.assertGreater(dots(36), dots(9))
 
     def test_particles_move_with_the_phase(self):
-        frames = [self._parts(0.0, 40, phase=step, particles=12)[2:] for step in range(6)]
-        self.assertGreater(len(set(frames)), 1, "the bar must animate")
+        frames = [self._parts(0.0, 40, phase=step, particles=12)[1] for step in range(6)]
+        self.assertGreater(len(set(frames)), 1, "the track must animate")
 
 
 class TextHelperTests(unittest.TestCase):

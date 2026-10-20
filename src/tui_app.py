@@ -1018,7 +1018,7 @@ def screen_sources() -> Box:
 
 
 def screen_run() -> Box:
-    """Live run screen: context, the activity log, and the two-row wave bar.
+    """Live run screen: context, the activity log, and the one-row bar.
 
     The log block is padded to a fixed number of rows so the screen never
     grows or shrinks while events stream in.
@@ -1031,16 +1031,10 @@ def screen_run() -> Box:
             gap(),
             *log_block(activity_rows()),
             gap(),
-            Box(
-                Row(
-                    Text(lambda: progress_parts()[0], fg=accent()),
-                    Text(lambda: progress_parts()[1], fg=TERTIARY),
-                    Text(lambda: progress_parts()[2], fg=SECONDARY, bold=True),
-                ),
-                Row(
-                    Text(lambda: progress_parts()[3], fg=accent()),
-                    Text(lambda: progress_parts()[4], fg=TERTIARY),
-                ),
+            Row(
+                Text(lambda: progress_parts()[0], fg=accent()),
+                Text(lambda: progress_parts()[1], fg=TERTIARY),
+                Text(lambda: progress_parts()[2], fg=SECONDARY, bold=True),
             ),
             Text(lambda: clock_line(), fg=SECONDARY),
             Text(lambda: timing_line(), fg=TERTIARY),
@@ -1745,22 +1739,23 @@ def activity_rows() -> int:
     """How many activity lines the run screen shows at this terminal height.
 
     Everything else on the screen is fixed height (two panel paddings, the
-    title, query and phase lines, the bar and its two stat lines, the gaps,
-    and the hint), so the log takes what is left.
+    title, query and phase lines, the one-row bar, its two stat lines, the
+    gaps, and the hint), so the log takes what is left.
     """
-    return max(4, term_height() - 15 - MARGIN_TOP)
+    return max(4, term_height() - 14 - MARGIN_TOP)
 
 
-_bar_frame = {"key": None, "parts": ("", "", "", "", "")}
+_bar_frame = {"key": None, "parts": ("", "", "")}
 
 
 def progress_parts() -> tuple:
     """The bar as (filled, track, percent), always exactly inner_width wide.
 
-    The percent is right-aligned by padding the *track*, never the suffix: a
-    Text child that begins with a space is dropped when it is a Row child in
-    this OpenTUI build, so the suffix must start with a digit. Memoised per
-    frame so the three row cells share one computation.
+    The filled part is solid and static; only the track carries the animated
+    particles. The percent is right-aligned by padding the *track*, never the
+    suffix: a Text child that begins with a space is dropped when it is a Row
+    child in this OpenTUI build, so the suffix must start with a digit.
+    Memoised per frame so the row cells share one computation.
     """
     completed, total, _ = prog_sig()
     ratio = min(1.0, completed / total) if total else 0.0
@@ -1768,14 +1763,13 @@ def progress_parts() -> tuple:
     key = (round(ratio, 4), anim_sig(), width)
     if _bar_frame["key"] == key:
         return _bar_frame["parts"]
-    (fill_top, fill_bottom), (track_top, track_bottom) = theme.braille_wave(
+    fill, track = theme.braille_bar(
         ratio, width, anim_sig() * ANIM_TRAVEL, particles_for(width)
     )
     percent = f"{ratio * 100:.0f}%"
-    track_top = track_top + " " * max(0, SUFFIX_WIDTH - len(percent))
-    track_bottom = track_bottom + " " * SUFFIX_WIDTH
+    track = track + " " * max(0, SUFFIX_WIDTH - len(percent))
     _bar_frame["key"] = key
-    _bar_frame["parts"] = (fill_top, track_top, percent, fill_bottom, track_bottom)
+    _bar_frame["parts"] = (fill, track, percent)
     return _bar_frame["parts"]
 
 

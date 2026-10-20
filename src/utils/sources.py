@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -480,6 +480,39 @@ def normalize_citations(
     # Removing an invalid marker can leave a space before punctuation.
     cleaned = re.sub(r"[ \t]+([.,;:!?])", r"\1", cleaned)
     return re.sub(r"[ \t]{2,}", " ", cleaned)
+
+
+def renumber_citations(text: str, entries: Iterable[SourceEntry]) -> Tuple[str, List[SourceEntry]]:
+    """Compact a citation set into a reference list of only what was cited.
+
+    Numbers are reassigned 1..k in order of first appearance and every marker
+    in *text* is rewritten to match. Entries that the body never cites are
+    dropped: a bibliography should list the works it refers to, not every page
+    the search engine returned.
+
+    Returns ``(rewritten_text, cited_entries)``.
+    """
+    by_number = {entry.number: entry for entry in entries}
+    mapping: Dict[int, int] = {}
+    ordered: List[SourceEntry] = []
+
+    for match in _CITATION_RE.finditer(text or ""):
+        for raw in re.findall(r"\d+", match.group(1)):
+            number = int(raw)
+            if number in mapping or number not in by_number:
+                continue
+            mapping[number] = len(ordered) + 1
+            ordered.append(replace(by_number[number], number=mapping[number]))
+
+    def replace_marker(match: re.Match) -> str:
+        numbers: List[int] = []
+        for raw in re.findall(r"\d+", match.group(1)):
+            new = mapping.get(int(raw))
+            if new and new not in numbers:
+                numbers.append(new)
+        return "".join(f"[Source {number}]" for number in numbers)
+
+    return _CITATION_RE.sub(replace_marker, text or ""), ordered
 
 
 def cited_numbers(text: str) -> Set[int]:

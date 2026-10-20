@@ -22,6 +22,7 @@ import asyncio  # noqa: E402
 from main import DeepResearchAgent  # noqa: E402
 from agents.report_generator import ReportGeneratorAgent  # noqa: E402
 from utils.llm_client import LLMClient  # noqa: E402
+from utils.sources import build_source_registry  # noqa: E402
 
 logging.getLogger("veritas").setLevel(logging.INFO)  # keep test output quiet
 from models.research_state import (  # noqa: E402
@@ -198,7 +199,8 @@ class _FakeLLM:
         self.requested = []
 
     def generate_section_async(self, *, section_title, theme_description,
-                               relevant_findings, main_query, style):
+                               relevant_findings, main_query, style,
+                               evidence_sources=None):
         self.requested.append(section_title)
 
         async def run():
@@ -217,11 +219,18 @@ class SectionOrderTests(unittest.IsolatedAsyncioTestCase):
 
     async def _run(self, themes, delays):
         state = make_state("How do quantization schemes differ?")
-        state.findings.append(
-            KnowledgeFinding(content="f", sources=["s"], confidence=0.9, question_id="q1")
-        )
+        for i in range(len(themes)):
+            state.findings.append(KnowledgeFinding(
+                content=f"f{i}", sources=[], confidence=0.9, question_id=f"q{i}"
+            ))
+        prepared = [
+            dict(theme, related_findings=theme.get("related_findings", [i]))
+            for i, theme in enumerate(themes)
+        ]
         agent = ReportGeneratorAgent(_FakeLLM(delays))
-        return await agent._generate_sections_parallel(state, {"themes": themes}, "comprehensive")
+        return await agent._generate_sections_parallel(
+            state, {"themes": prepared}, "comprehensive"
+        )
 
     async def test_order_follows_themes_not_completion(self):
         themes = [{"title": "Alpha"}, {"title": "Beta"}, {"title": "Gamma"}]
@@ -233,7 +242,10 @@ class SectionOrderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([s.content for s in sections], ["BODY:Alpha", "BODY:Beta", "BODY:Gamma"])
 
     async def test_a_failed_section_is_counted_but_keeps_its_slot(self):
-        themes = [{"title": "Alpha"}, {"title": "Beta"}]
+        themes = [
+            {"title": "Alpha", "related_findings": [0]},
+            {"title": "Beta", "related_findings": [1]},
+        ]
 
         class _Boom(_FakeLLM):
             def generate_section_async(self, *, section_title, **kw):
@@ -245,6 +257,10 @@ class SectionOrderTests(unittest.IsolatedAsyncioTestCase):
                 return run()
 
         state = make_state()
+        for i in range(2):
+            state.findings.append(KnowledgeFinding(
+                content=f"f{i}", sources=[], confidence=0.9, question_id=f"q{i}"
+            ))
         agent = ReportGeneratorAgent(_Boom({}))
         sections, failed = await agent._generate_sections_parallel(state, {"themes": themes}, "comprehensive")
         self.assertEqual(failed, 1)
@@ -272,24 +288,7 @@ class MetaAnalysisRenderingTests(unittest.TestCase):
         self.assertIn("**Cost**: Cheap — Expensive", content)
         self.assertIn("Peer-reviewed sources dominate.", content)
 
-    def test_unmapped_findings_are_spread_across_themes(self):
-        state = make_state()
-        for i in range(6):
-            state.findings.append(
-                KnowledgeFinding(content=f"f{i}", sources=[], confidence=0.5, question_id="q")
-            )
-        agent = ReportGeneratorAgent(None)
 
-        buckets = [
-            [f.content for f in agent._fallback_findings(state, i, 3)]
-            for i in range(3)
-        ]
-
-        self.assertEqual(
-            [finding for bucket in buckets for finding in bucket],
-            ["f0", "f3", "f1", "f4", "f2", "f5"],
-        )
-        self.assertEqual(len({tuple(bucket) for bucket in buckets}), 3)
 
 
 class GapRecordingTests(unittest.TestCase):
@@ -323,8 +322,10 @@ class _ReportPipelineLLM:
         ]}
 
     def generate_section_async(self, *, section_title, theme_description,
-                               relevant_findings, main_query, style):
+                               relevant_findings, main_query, style,
+                               evidence_sources=None):
         self.seen_findings = relevant_findings
+        self.seen_evidence = evidence_sources
 
         async def run():
             return (
@@ -335,7 +336,7 @@ class _ReportPipelineLLM:
 
         return run()
 
-    def generate_executive_summary(self, main_query, sections, key_findings,
+    def generate_executive_summary(self, main_query, key_findings,
                                    source_numbers=None):
         self.summary_numbers = sorted(source_numbers or [])
         return "A summary that keeps a section citation [Source 1]."
@@ -366,6 +367,7 @@ class ReportCitationPipelineTests(unittest.IsolatedAsyncioTestCase):
                 content="c" * 600,
                 score=0.7,
                 category="general",
+                question_id="q1",
                 analyzed=True,
             ),
         ]
@@ -381,6 +383,9 @@ class ReportCitationPipelineTests(unittest.IsolatedAsyncioTestCase):
 
         # The section prompt used the report-wide numbers, not local indices.
         self.assertEqual(llm.seen_findings[0]["source_numbers"], [1, 2])
+        # The finding's own pages come first, then the page the analysis read
+        # for the same question but never quoted; all three are citable.
+        self.assertEqual([s["number"] for s in llm.seen_evidence], [1, 2, 3])
         self.assertIn("A supported claim [Source 1].", report)
         self.assertIn("A corroborated claim [Source 2][Source 1].", report)
         self.assertNotIn("Source 99", report)
@@ -389,18 +394,77 @@ class ReportCitationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm.summary_numbers, [1, 2])
         self.assertIn("A summary that keeps a section citation [Source 1].", report)
         self.assertIn("## Executive Summary", report)
-        # The bibliography says how far each source actually got, so it cannot
-        # read as evidence the text never used.
-        self.assertIn("Collected only — not analyzed", report)
-        self.assertIn("Analyzed — not cited in this report", report)
-        self.assertIn("Unique sources: 3 (2 cited)", report)
+        # The bibliography lists only what the body cited, renumbered from 1,
+        # and summarises the unused pages in one line rather than padding it.
+        self.assertIn("Sources: 2 cited of 3 reviewed", report)
         self.assertIn("## Mechanism", report)
         self.assertIn("## Sources", report)
         self.assertIn("1. [Source 1] **Quantization paper**", report)
         self.assertIn("Published: 2026-01-02", report)
         self.assertIn("2. [Source 2] **Quantization analysis**", report)
+        self.assertIn("1 additional source was reviewed but not cited", report)
+        self.assertNotIn("https://example.net/collected", report)
         self.assertEqual(state.report_sections[0].sources,
                          ["https://example.com/paper", "https://example.org/analysis"])
+
+
+class EvidenceSourceTests(unittest.TestCase):
+    """A section gets one excerpt per page it may cite: the finding's own
+    sources first, then pages the analysis read but never quoted."""
+
+    def test_own_sources_first_then_unquoted_read_sources(self):
+        state = make_state("q")
+        used = SearchResult(url="https://used.example/a", title="Used",
+                            content="u" * 200, score=0.4, question_id="q1")
+        extra_low = SearchResult(url="https://low.example/b", title="Low",
+                                 content="l" * 200, score=0.2,
+                                 question_id="q1", analyzed=True)
+        extra_high = SearchResult(url="https://high.example/c", title="High",
+                                  content="h" * 200, score=0.8, quality=0.9,
+                                  question_id="q1", analyzed=True)
+        other_question = SearchResult(url="https://other.example/d", title="Other",
+                                      content="o" * 200, score=0.9,
+                                      question_id="q2", analyzed=True)
+        unread = SearchResult(url="https://unread.example/e", title="Unread",
+                              content="n" * 200, score=0.9, question_id="q1")
+        state.search_results = [used, extra_low, extra_high, other_question, unread]
+
+        numbers, _ = build_source_registry(state.search_results)
+        finding = KnowledgeFinding(
+            content="claim", sources=[used.url], confidence=0.7, question_id="q1"
+        )
+        picked = ReportGeneratorAgent._evidence_sources(
+            state, [finding], numbers
+        )
+
+        self.assertEqual(
+            [item["number"] for item in picked],
+            [numbers[used.url], numbers[extra_high.url], numbers[extra_low.url]],
+        )
+        # The finding's own page leads, so its excerpt is available to cite.
+        self.assertEqual(picked[0]["title"], "Used")
+        included = [item["number"] for item in picked]
+        self.assertNotIn(numbers[other_question.url], included)
+        self.assertNotIn(numbers[unread.url], included)
+
+    def test_excerpts_are_capped(self):
+        state = make_state("q")
+        state.search_results = [
+            SearchResult(url=f"https://ex.example/{i}", title=f"Source {i}",
+                         content=("x" * 200) + str(i), score=0.1 * i,
+                         question_id="q1", analyzed=True)
+            for i in range(12)
+        ]
+        numbers, _ = build_source_registry(state.search_results)
+        finding = KnowledgeFinding(
+            content="claim", sources=[state.search_results[0].url],
+            confidence=0.7, question_id="q1"
+        )
+
+        picked = ReportGeneratorAgent._evidence_sources(state, [finding], numbers)
+
+        self.assertEqual(len(picked), 6)
+        self.assertEqual(picked[0]["number"], numbers[state.search_results[0].url])
 
 
 class _SyncSectionLLM(LLMClient):
@@ -416,7 +480,8 @@ class _SyncSectionLLM(LLMClient):
         self.seen = []
 
     def _generate_section_sync(self, section_title, theme_description,
-                               relevant_findings, main_query, style="comprehensive"):
+                               relevant_findings, main_query, style="comprehensive",
+                               evidence_sources=None):
         self.seen.append((section_title, threading.current_thread().name))
         return f"BODY:{section_title}"
 

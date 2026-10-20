@@ -47,6 +47,7 @@ htmlcov/
 .freebuff/
 AGENTS.md
 TODO.md
+KNOWLEDGE.md
 
 # Logs
 *.log

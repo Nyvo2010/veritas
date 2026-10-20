@@ -762,7 +762,9 @@ Return JSON:
 }
 
 "source_indices" must be 1-based indices of the Search Results that directly
-support the answer. Do not list a source you did not use."""
+support the answer. Include every result that supports part of it (usually
+2-4 distinct sources when the results allow); do not list a source you did not
+use."""
 
         # Format search results. The pipeline already selected the strongest
         # subset; spend a real text budget on each one instead of reading only
@@ -845,6 +847,7 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
         relevant_findings: List[Dict],
         main_query: str,
         style: str = "comprehensive",
+        evidence_sources: List[Dict] = None,
     ) -> str:
         """Generate one report section (sync) with primary -> fallback retry."""
         return self._with_fallback(
@@ -854,6 +857,7 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
             relevant_findings,
             main_query,
             style,
+            evidence_sources,
         )
 
     async def generate_section_async(
@@ -863,6 +867,7 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
         relevant_findings: List[Dict],
         main_query: str,
         style: str = "comprehensive",
+        evidence_sources: List[Dict] = None,
     ) -> str:
         """Generate one report section without blocking the event loop.
 
@@ -878,6 +883,7 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
             relevant_findings,
             main_query,
             style,
+            evidence_sources,
         )
 
     def _generate_section_sync(
@@ -887,6 +893,7 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
         relevant_findings: List[Dict],
         main_query: str,
         style: str = "comprehensive",
+        evidence_sources: List[Dict] = None,
     ) -> str:
         """Generate a single report section.
 
@@ -904,7 +911,7 @@ Scope: this section speaks only to the main research query — "{main_query}".
 Target style: {style}. Stay on topic, do not drift to tangentially related
 subjects, and base every claim on the evidence provided.
 
-Write 1000-1800 words of original analysis that:
+Write 900-1400 words of original analysis that:
 - examines the specific mechanisms, dynamics, or patterns behind this theme
 - uses concrete examples, figures, and evidence rather than generalities
 - includes counterarguments, nuances, and limitations where they exist
@@ -915,30 +922,55 @@ Write 1000-1800 words of original analysis that:
 Return only the section body; its heading is added automatically."""
 
 
-        def evidence_label(finding: Dict, index: int) -> str:
-            """Stable, report-wide source numbers supplied by the assembler."""
+        def finding_sources(finding: Dict, index: int) -> str:
+            """Stable, report-wide source numbers supplied by the assembler.
+
+            Listed *after* the finding, not before it: a leading block of
+            markers reads as text to copy, and came back pasted onto every
+            sentence of a section.
+            """
             numbers = finding.get("source_numbers") or []
-            if numbers:
-                return "".join(f"[Source {int(number)}] " for number in numbers)
-            # Standalone callers (tests, other frontends) may not have a
-            # registry; fall back to local numbering for the prompt only.
-            return f"[Source {index + 1}] "
+            if not numbers:
+                # Standalone callers (tests, other frontends) may not have a
+                # registry; fall back to local numbering for the prompt only.
+                numbers = [index + 1]
+            return ", ".join(f"[Source {int(number)}]" for number in numbers)
 
         findings_text = "\n\n".join([
-            f"{evidence_label(f, i)}{f.get('content', '')[:600]}\n"
+            f"{f.get('content', '')[:600]}\n"
+            f"Synthesised from: {finding_sources(f, i)}\n"
             f"Confidence: {float(f.get('confidence', 0.5)):.2f}"
             for i, f in enumerate(relevant_findings[:15])
         ])
+
+        # One excerpt per numbered page, the finding's own sources included.
+        # Without the text behind a number the model can only repeat the block;
+        # with it, it can attach a citation to the sentence it supports.
+        evidence_text = ""
+        excerpt_sources = [
+            source for source in (evidence_sources or []) if source.get("number")
+        ][:6]
+        if excerpt_sources:
+            evidence_text = (
+                "\n\nSource evidence (one excerpt per numbered page; a marker "
+                "belongs only on the sentence that excerpt supports):\n"
+                + "\n\n".join(
+                    f"[Source {int(source['number'])}] "
+                    f"{source.get('title', '')} — "
+                    f"{(source.get('content') or '')[:900]}"
+                    for source in excerpt_sources
+                )
+            )
 
         user_prompt = f"""Research Query: {main_query}
 
 Section Focus: {section_title}
 Unique Angle: {theme_description}
 
-Relevant Evidence:
-{findings_text}
+Findings (synthesis of the searches):
+{findings_text}{evidence_text}
 
-Write this section (1000-1800 words), exploring the theme in depth:
+Write this section (900-1400 words), exploring the theme in depth:
 
 STRUCTURE:
 1. Open with the most important insight or finding (no generic intro)
@@ -948,14 +980,19 @@ STRUCTURE:
 5. Connect the points back to the broader research question
 
 Prioritise depth over breadth: reveal something specific and well-evidenced,
-not generic observations. Cite the evidence above as [Source N]. Use only the
-numbers shown in the evidence labels; when a finding carries several numbers,
-cite only the ones that actually support that sentence.
+not generic observations. Cite the evidence above as [Source N], using only
+the numbers shown in the evidence.
 
-SOURCE COVERAGE: the labels offer several sources. Spread the citations over
-the distinct sources that genuinely support each point instead of leaning on
-one or two, and do not cite the same source more than a few times in this
-section. A citation is not decoration: attach it to the sentence it supports."""
+SOURCE COVERAGE: "Synthesised from" lists the pages a finding was drawn from
+as a group — it is not a citation to paste. Cite the one or two sources whose
+excerpt supports the sentence, spread the citations over the distinct sources
+that genuinely support each point, and never repeat the same block of several
+markers from sentence to sentence. Use at least three distinct sources when
+the evidence allows, and cite no single source more than three times in this
+section: one source repeated down a whole argument claims more agreement than
+the evidence has. A citation is not decoration: attach it to the sentence it
+supports. If the source evidence and the findings disagree, say so rather than
+averaging them."""
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -984,20 +1021,18 @@ section. A citation is not decoration: attach it to the sentence it supports."""
     def generate_executive_summary(
         self,
         main_query: str,
-        all_sections: List[str],
         key_findings: List[str],
         source_numbers: List[int] = None,
     ) -> str:
         """Executive summary with the primary model, falling back once on failure."""
         return self._with_fallback(
-            self._generate_executive_summary, main_query, all_sections,
+            self._generate_executive_summary, main_query,
             key_findings, source_numbers,
         )
 
     def _generate_executive_summary(
         self,
         main_query: str,
-        all_sections: List[str],
         key_findings: List[str],
         source_numbers: List[int] = None,
     ) -> str:
@@ -1005,10 +1040,13 @@ section. A citation is not decoration: attach it to the sentence it supports."""
         numbers = [int(number) for number in (source_numbers or [])]
         if numbers:
             citation_rule = (
-                "Cite each concrete claim as [Source N], drawing only on these "
-                "numbers already cited by the sections: "
+                "Each finding ends with the sources behind it. Cite a concrete "
+                "claim as [Source N], drawing only on these numbers already "
+                "cited by the sections: "
                 + ", ".join(str(number) for number in numbers)
-                + ". Never invent a number or cite a source outside that list."
+                + ". Never invent a number or cite a source outside that list. "
+                "The label at the end of a finding is not a block to copy: put "
+                "one or two markers on the sentence they support."
             )
         else:
             citation_rule = "Omit [Source N] markers: no source was cited by the sections."
@@ -1028,20 +1066,15 @@ Write 600-900 words that:
         The summary must stand alone: do not refer to "the report", "the sections
         above", or the research process itself."""
 
-        sections_preview = "\n\n".join([
-            f"Section {i+1} key points:\n{s[:500]}..."
-            for i, s in enumerate(all_sections[:8])
-        ])
-
-        findings_text = "\n".join([f"- {f[:150]}" for f in key_findings[:10]])
+        # The summary is written from the findings, not from the section prose:
+        # handing over section openings made the model echo them back verbatim
+        # as its own paragraphs.
+        findings_text = "\n".join([f"- {f[:400]}" for f in key_findings[:10]])
 
         user_prompt = f"""Research Query: {main_query}
 
 Key Findings:
 {findings_text}
-
-Section Previews:
-{sections_preview}
 
 Write the executive summary (600-900 words) capturing the most important
 insights. Be specific and actionable; avoid generic statements."""

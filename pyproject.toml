@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "veritas-research"
-version = "1.0.1"
+version = "1.0.2"
 description = "Veritas Deep Research Agent - deep, iterative web research with a live terminal UI"
 readme = "README.md"
 license = "MIT"
