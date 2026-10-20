@@ -143,13 +143,18 @@ class ReportGeneratorAgent:
         """
         Use LLM to identify major themes from all findings
         """
+        # Stable ids travel with each finding so the theme prompt can point at
+        # the finding it is about instead of a positional index. Indices are
+        # what let a theme title mislabel its section: one extra or missing
+        # finding shifts every number after it.
         findings_data = [
             {
+                "id": f"F{index + 1}",
                 "content": f.content,
                 "confidence": f.confidence,
-                "sources": f.sources[:2]
+                "sources": f.sources[:2],
             }
-            for f in state.findings
+            for index, f in enumerate(state.findings)
         ]
         
         themes = await asyncio.to_thread(
@@ -187,16 +192,26 @@ class ReportGeneratorAgent:
         # a title and a focus for the finding they mention first.
         titles = {}
         descriptions = {}
+        by_id = {f"F{index + 1}": index for index in range(len(state.findings))}
         for theme in theme_list:
             if not isinstance(theme, dict):
                 continue
-            raw_indices = theme.get("related_findings") or []
-            if not isinstance(raw_indices, list):
-                continue
-            for idx in (int(x) for x in raw_indices if str(x).isdigit()):
-                if 0 <= idx < len(state.findings):
-                    titles.setdefault(idx, theme.get("title"))
-                    descriptions.setdefault(idx, theme.get("description"))
+            # Preferred: the finding ids the prompt asked for. Older/creative
+            # replies may still send positional indices, so accept those too.
+            ids = theme.get("related_finding_ids")
+            indices = []
+            if isinstance(ids, list):
+                for value in ids:
+                    key = str(value).strip().upper()
+                    if key in by_id:
+                        indices.append(by_id[key])
+            raw_indices = theme.get("related_findings")
+            if isinstance(raw_indices, list):
+                indices.extend(int(x) for x in raw_indices
+                               if str(x).isdigit() and 0 <= int(x) < len(state.findings))
+            for idx in indices:
+                titles.setdefault(idx, theme.get("title"))
+                descriptions.setdefault(idx, theme.get("description"))
 
         def finding_numbers(finding) -> list:
             """Report-wide numbers for a finding's supporting URLs."""

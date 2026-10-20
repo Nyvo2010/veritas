@@ -116,8 +116,10 @@ class SynthesisAgent:
                     url = search_results[index].url
                     if url and url not in cited_urls:
                         cited_urls.append(url)
-            if not cited_urls:
-                cited_urls = [r.url for r in search_results[:5]]
+            # No indices means the model named no support. Presenting the first
+            # five results as that support made every claim look grounded when
+            # it was not; the section still receives the analysed pages for its
+            # question as citable evidence, so nothing is lost by staying empty.
 
             finding = KnowledgeFinding(
                 content=answer,

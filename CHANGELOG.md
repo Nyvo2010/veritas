@@ -2,11 +2,27 @@
 
 Notable changes per release. This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.3] - 2026-10-20
 
-- The progress bar is one row again: the completed part is a solid, gap-free,
+- Report themes point at findings by id instead of by position, so a theme title
+  can no longer land on the wrong section when a finding is added or dropped
+  (the earlier fusion run had a "Stellarator Geometry" section about deployment
+  timelines). Replies that still send positional indices keep working.
+- A finding no longer claims the first five search results as its support when
+  the analysis named none. Nothing is invented; the section still receives the
+  analysed pages for its question as citable evidence.
+- Reports are written through a private temporary file and renamed into place,
+  so a crash mid-write cannot truncate an existing report.
+- A question whose search or analysis failed stays `FAILED` when the run moves
+  on; `answered` and `failed` counts now agree with what happened.
+- Failed searches are counted in `total_searches`, so a run that hit network
+  errors no longer reports that it made no searches.
+- The progress bar is one row: the completed part is a solid, gap-free,
   non-animated block, and only the remaining track keeps the drifting
   particles. Both the TUI and the Rich CLI use the same bar.
+- CI runs the suite on Python 3.12, 3.13 and 3.14, and a second job builds the
+  wheel, installs it into a clean venv and boots `veritas --version` — the
+  packaging path the editable install never exercised.
 
 ## [1.0.2] - 2026-10-20
 

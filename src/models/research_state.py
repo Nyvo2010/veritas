@@ -127,8 +127,11 @@ class ResearchState:
         """Mark a question as completed"""
         question = self.get_question_by_id(question_id)
         if question:
-            question.status = QuestionStatus.COMPLETED
-            self.completed_questions.add(question_id)
+            # A question whose search or analysis failed stays FAILED: the
+            # report counts answered vs failed questions from this status.
+            if question.status is not QuestionStatus.FAILED:
+                question.status = QuestionStatus.COMPLETED
+                self.completed_questions.add(question_id)
             if question_id in self.question_queue:
                 self.question_queue.remove(question_id)
     

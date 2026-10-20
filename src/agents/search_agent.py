@@ -73,6 +73,10 @@ class SearchAgent:
         
         # Suppress initial search announcement
         
+        # Count the attempt, not just the successes: a run that fails every
+        # search still made searches, and the report's stats say so.
+        state.total_searches += 1
+
         try:
             # Execute Tavily search off the event loop so the TUI spinner
             # keeps animating during network waits.
@@ -89,8 +93,6 @@ class SearchAgent:
                 )
             )
             
-            state.total_searches += 1
-
             # Convert to SearchResult objects
             candidates = []
             raw_results = response.get("results", [])

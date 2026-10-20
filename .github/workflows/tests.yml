@@ -5,13 +5,17 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,3 +23,18 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install .
       - run: python -m unittest discover -s tests -v
+
+  package:
+    # The suite runs from the source tree; this job proves the artifact users
+    # install actually boots, including its console entry point.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install build
+      - run: python -m build --wheel --outdir dist
+      - run: python -m venv /tmp/install && /tmp/install/bin/pip install dist/*.whl
+      - run: /tmp/install/bin/veritas --version
+      - run: /tmp/install/bin/python -c "import tui_app, cli, settings; print('imports ok')"

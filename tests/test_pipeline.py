@@ -15,7 +15,7 @@ from rich.console import Console  # noqa: E402
 
 from agents.search_agent import SearchAgent  # noqa: E402
 from main import DeepResearchAgent  # noqa: E402
-from models.research_state import QuestionStatus, SubQuestion  # noqa: E402
+from models.research_state import QuestionStatus, ResearchState, SubQuestion  # noqa: E402
 from utils.ui_manager import UIManager  # noqa: E402
 
 
@@ -141,6 +141,27 @@ def _agent(search=None):
     agent.save_error = ""
     agent._settings = {}
     return agent
+
+
+class QuestionStatusTests(unittest.TestCase):
+    def test_completing_a_failed_question_keeps_it_failed(self):
+        state = ResearchState(main_query="q", category_toggles={})
+        state.add_question(SubQuestion(id="q1", question="Q?"))
+        state.get_question_by_id("q1").status = QuestionStatus.FAILED
+
+        state.mark_question_completed("q1")
+
+        self.assertEqual(state.get_question_by_id("q1").status, QuestionStatus.FAILED)
+        self.assertEqual([q.id for q in state.failed_questions()], ["q1"])
+        self.assertEqual([q.id for q in state.answered_questions()], [])
+
+    def test_a_pending_question_becomes_completed(self):
+        state = ResearchState(main_query="q", category_toggles={})
+        state.add_question(SubQuestion(id="q1", question="Q?"))
+
+        state.mark_question_completed("q1")
+
+        self.assertEqual(state.get_question_by_id("q1").status, QuestionStatus.COMPLETED)
 
 
 class EmptySearchTests(unittest.IsolatedAsyncioTestCase):
