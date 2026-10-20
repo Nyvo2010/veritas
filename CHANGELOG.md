@@ -2,6 +2,43 @@
 
 Notable changes per release. This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+- The progress bar is one row again: the completed part is a solid, gap-free,
+  non-animated block, and only the remaining track keeps the drifting
+  particles. Both the TUI and the Rich CLI use the same bar.
+
+## [1.0.2] - 2026-10-20
+
+- Fixed the crash that broke every run outside the TUI: the orchestrator calls
+  `ui.set_progress()`, but `UIManager` (the object the classic CLI passes when
+  no UI is supplied) only defined `update_progress`. On Python 3.14, where
+  `opentui` is not installed and the CLI is the only interface, research could
+  not start at all. The CLI path is now covered by a test that drives
+  `research()` with the real `UIManager`.
+- Reports write one section per finding instead of re-using the same two or
+  three findings across six to ten themes. A three-iteration run now produces
+  three distinct sections rather than seven that paraphrase each other.
+- Section evidence is widened and actually citable. Each section receives one
+  excerpt per numbered page — the finding's own sources first, then pages the
+  analysis read for the same questions but never quoted — and citation
+  validation accepts every number it was shown. Before, any marker outside the
+  finding's own block was stripped, so a one-source finding could only ever
+  produce a one-source section.
+- A finding's source numbers are listed after its text rather than as a block
+  before it. The leading block was coming back pasted onto nearly every
+  sentence; the section prompt now asks for a marker only on the sentence an
+  excerpt supports, with a cap on how often one source may be cited.
+- The bibliography lists only the pages the body cites, renumbered 1..k in
+  first-appearance order, so it can never gap or point at an unused page. The
+  header reads `Sources: X cited of Y reviewed` and one closing line accounts
+  for the rest.
+- The executive summary is written from the findings rather than from section
+  previews, which it had been echoing back verbatim, and it still receives the
+  findings' source numbers so its claims stay cited. The analysis prompt asks
+  for every source that supports an answer (usually two to four) instead of
+  whichever one the model named first.
+
 ## [1.0.1] - 2026-10-19
 
 - The progress bar is a two-row braille wave: a rippling filled band with a

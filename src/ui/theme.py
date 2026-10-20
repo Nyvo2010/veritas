@@ -6,11 +6,9 @@ Rules enforced here so spacing never drifts again:
 - One color palette, imported — never hardcoded elsewhere.
 
 The OpenTUI frontend (tui_app.py) does not use the Rich styles below; it
-imports the glyphs, the themes, and :func:`braille_wave` so both frontends
+imports the glyphs, the themes, and :func:`braille_bar` so both frontends
 share one vocabulary and one progress bar.
 """
-
-import math
 
 from rich import box
 
@@ -127,26 +125,15 @@ def format_eta(seconds: float) -> str:
 _BRAILLE_BIT = ((0x01, 0x08), (0x02, 0x10), (0x04, 0x20), (0x40, 0x80))
 _BRAILLE_FULL = 0xFF                       # all eight dots
 
-# Dot rows of the leading cell, filled bottom to top across both text rows, so
-# progress creeps forward as a rising meniscus rather than a flat cut.
-_EDGE_ROWS = (
-    (1, 3), (1, 2), (1, 1), (1, 0),
-    (0, 3), (0, 2), (0, 1), (0, 0),
-)
+def braille_bar(ratio: float, width: int, phase: float = 0.0, particles: int = 16) -> tuple:
+    """A one-row braille progress bar: ``(filled, track)``.
 
-
-def braille_wave(ratio: float, width: int, phase: float = 0.0, particles: int = 16) -> tuple:
-    """A two-row braille progress band: ``((fill_top, fill_bottom),
-    (track_top, track_bottom))``.
-
-    Eight dot rows tall, so it reads as a liquid band instead of a hairline.
-    The filled cells carry a travelling ripple on their surface, the leading
-    cell rises as a meniscus, and the remaining track is a particle field:
-    *particles* drift left across eight lanes at different speeds, each leaving
-    a short streak. Every row string is exactly *width* cells wide.
-
-    *phase* is the animation clock in cells travelled, so the callers keep no
-    animation state of their own.
+    The completed part is solid, gap-free and static: it never ripples, so the
+    filled width is exactly what has been done. Only the remaining track
+    animates — *particles* drift left across four dot lanes at different
+    speeds, each leaving a short streak. Both strings are exactly *width*
+    cells wide, and *phase* is the animation clock in cells travelled, so the
+    callers keep no animation state of their own.
     """
     try:
         ratio = max(0.0, min(1.0, float(ratio)))
@@ -155,56 +142,28 @@ def braille_wave(ratio: float, width: int, phase: float = 0.0, particles: int = 
     width = max(4, int(width))
     particles = max(0, int(particles))
 
-    exact = ratio * width
-    full = min(int(exact), width)
-    edge_steps = int(round((exact - full) * 8)) if full < width else 0
-    edge_steps = max(0, min(8, edge_steps))
-    fill_cells = min(width, full + (1 if edge_steps else 0))
-    track_len = width - fill_cells
+    filled = min(width, int(round(ratio * width)))
+    track_len = width - filled
+    fill = chr(0x2800 + _BRAILLE_FULL) * filled
 
-    fill = [bytearray(width), bytearray(width)]
-    track = [bytearray(width), bytearray(width)]
-
-    for x in range(fill_cells):
-        if x < full:
-            surface = 0xFF
-            crest = math.sin(x * 0.55 - phase * 1.15)
-            if crest > 0.45:
-                surface &= ~0x09   # one dot row shallower: the crest
-            elif crest < -0.7:
-                surface &= ~0x12   # two rows: the trough
-            fill[0][x] = surface
-            fill[1][x] = _BRAILLE_FULL
-        else:
-            for step in range(edge_steps):
-                text_row, dot_row = _EDGE_ROWS[step]
-                fill[text_row][x] |= (
-                    _BRAILLE_BIT[dot_row][0] | _BRAILLE_BIT[dot_row][1]
-                )
-
+    track = bytearray(track_len)
     if track_len and particles:
         for index in range(particles):
             # Deterministic per-particle lane, speed, and offset: the field
             # spreads out and never marches in lockstep.
             seed = (index * 2654435761) & 0xFFFFFFFF
-            lane = seed & 7
-            text_row = 0 if lane < 4 else 1
-            dot_row = lane & 3
+            lane = seed & 3
             speed = 0.7 + ((seed >> 9) & 0xFF) / 255.0 * 1.6
             start = ((seed >> 17) % 997) / 997.0 * (track_len + 8)
             gap = 4 + ((seed >> 5) % 9)
             position = (start - phase * speed) % (track_len + gap)
             if position >= track_len:
                 continue  # still off-screen right
-            cell = fill_cells + int(position)
-            column = 0 if position - int(position) < 0.5 else 1
-            track[text_row][cell] |= _BRAILLE_BIT[dot_row][column]
+            cell = int(position)
+            column = 0 if position - cell < 0.5 else 1
+            track[cell] |= _BRAILLE_BIT[lane][column]
             # One dot further right reads as a streak, not a blip.
-            if cell + 1 < width:
-                track[text_row][cell + 1] |= _BRAILLE_BIT[dot_row][column]
+            if cell + 1 < track_len:
+                track[cell + 1] |= _BRAILLE_BIT[lane][column]
 
-    def render(masks) -> str:
-        return "".join(chr(0x2800 + mask) for mask in masks)
-
-    return ((render(fill[0][:fill_cells]), render(fill[1][:fill_cells])),
-            (render(track[0][fill_cells:]), render(track[1][fill_cells:])))
+    return fill, "".join(chr(0x2800 + mask) for mask in track)

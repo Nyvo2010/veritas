@@ -4,15 +4,19 @@ Empty search results are normal for an over-specific question. They must skip
 that question, not abort the whole research run.
 """
 
+import io
 import os
 import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
+from rich.console import Console  # noqa: E402
+
 from agents.search_agent import SearchAgent  # noqa: E402
 from main import DeepResearchAgent  # noqa: E402
 from models.research_state import QuestionStatus, SubQuestion  # noqa: E402
+from utils.ui_manager import UIManager  # noqa: E402
 
 
 class _FakeUI:
@@ -156,6 +160,35 @@ class EmptySearchTests(unittest.IsolatedAsyncioTestCase):
             all(q.status is QuestionStatus.FAILED for q in state.questions)
         )
         self.assertEqual(state.final_report, "# Report\n")
+
+
+class RealUIManagerTests(unittest.IsolatedAsyncioTestCase):
+    """The CLI path passes no UI object, so research() drives UIManager itself.
+
+    It used to call a method UIManager did not have, and every non-TUI run died
+    at the first progress update. The fake UI in the other tests defined the
+    method, so the mismatch was invisible.
+    """
+
+    async def test_research_runs_against_the_real_ui_manager(self):
+        console = Console(file=io.StringIO(), force_terminal=False, width=100)
+        ui = UIManager(console=console)
+
+        await _agent().research(
+            "a plain question", max_iterations=1, verbose=False, ui=ui
+        )
+
+        self.assertGreater(ui.renderer.completed_steps, 0)
+
+    def test_ui_manager_exposes_the_surface_research_calls(self):
+        ui = UIManager(console=Console(file=io.StringIO()))
+        for name in (
+            "initialize", "start", "stop", "set_phase", "set_status",
+            "set_progress", "set_total", "advance", "add_timing", "log",
+            "complete",
+        ):
+            self.assertTrue(callable(getattr(ui, name, None)), f"UIManager.{name} is missing")
+        self.assertTrue(hasattr(ui.renderer, "completed_steps"))
 
 
 class SearchResultCountTests(unittest.IsolatedAsyncioTestCase):

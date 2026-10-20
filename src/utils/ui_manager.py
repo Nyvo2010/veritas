@@ -54,15 +54,20 @@ class UIManager:
     def complete(self) -> None:
         self._renderer.complete(ok=True)
 
-    def update_progress(self, progress: float, status: str = "") -> None:
+    def set_progress(self, completed: float, status: str = "") -> None:
+        """Set absolute progress; the name main.py and QueueUI both use."""
         try:
-            value = float(progress)
+            value = float(completed)
         except (TypeError, ValueError):
             value = 0.0
         # Clamp into dynamic total; totals can grow as follow-ups arrive.
         if value > self._renderer.total_steps:
             self._renderer.set_total(int(value) + 1)
         self._renderer.set_progress(value, status=status)
+
+    # Kept because older callers (and the docs) use the update_* spelling.
+    def update_progress(self, progress: float, status: str = "") -> None:
+        self.set_progress(progress, status=status)
 
     def set_total(self, total: int) -> None:
         self._total = max(1, int(total))
