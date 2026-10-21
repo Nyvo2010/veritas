@@ -127,6 +127,56 @@ class PrepareResultsTests(unittest.TestCase):
         self.assertEqual(len(kept), 1)
         self.assertIn("duplicate article text", rejected[0][1])
 
+    def test_a_republished_article_with_different_chrome_is_one_source(self):
+        # The bodies are near-identical, but each site adds its own header,
+        # byline and related-links block, so the first 320 characters differ.
+        body = "Quantization cuts weight precision to four bits, which halves " \
+               "memory traffic and changes the accuracy trade-off. " * 30
+        first = result(
+            "https://one.example/story",
+            full_content="Home | One News | Subscribe now\n" + body,
+        )
+        second = result(
+            "https://two.example/story",
+            full_content="Two Daily - Sign in - Menu\n" + body + "\nRelated: other news",
+        )
+
+        kept, rejected = prepare_results([first, second])
+
+        self.assertEqual(len(kept), 1)
+        self.assertIn("near-duplicate article text", rejected[0][1])
+
+    def test_the_same_paper_as_html_and_as_pdf_is_one_source(self):
+        title = "A Comprehensive Evaluation of Quantization Strategies for Large Language Models"
+        html = result(
+            "https://arxiv.org/html/2402.16775v1", title=title,
+            full_content="Quantization strategies survey body. " * 40,
+        )
+        pdf = result(
+            "https://aclanthology.org/2024.findings-acl.726.pdf",
+            title="[PDF] A Comprehensive Evaluation of Quantization Strategies for Large Language ...",
+            full_content="Different rendering of the same survey. " * 40,
+        )
+
+        kept, rejected = prepare_results([html, pdf])
+
+        self.assertEqual(len(kept), 1)
+        self.assertIn("near-duplicate article text", rejected[0][1])
+
+    def test_two_articles_on_the_same_topic_stay_separate(self):
+        first = result(
+            "https://one.example/a",
+            full_content="Quantization reduces weight precision to save memory. " * 20,
+        )
+        second = result(
+            "https://two.example/b",
+            full_content="Speculative decoding drafts tokens with a small model. " * 20,
+        )
+
+        kept, _ = prepare_results([first, second])
+
+        self.assertEqual(len(kept), 2)
+
     def test_quality_prefers_educational_over_social_all_else_equal(self):
         educational = result("https://example.com/paper", category="educational")
         social = result("https://example.com/post", category="social")
@@ -195,6 +245,13 @@ class RegistryTests(unittest.TestCase):
 
 
 class CitationTests(unittest.TestCase):
+    def test_adjacent_markers_lose_the_comma_between_them(self):
+        self.assertEqual(
+            normalize_citations("A claim [Source 1], [Source 2].", {1, 2}),
+            "A claim [Source 1][Source 2].",
+        )
+
+
     def test_markers_are_canonicalised_and_unknown_sources_dropped(self):
         text = (
             "First claim [source 1]. Second claim [Sources 2, 5]. "

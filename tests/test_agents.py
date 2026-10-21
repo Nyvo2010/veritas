@@ -15,6 +15,7 @@ from agents.query_analyzer import QueryAnalyzerAgent  # noqa: E402
 from agents.search_agent import SearchAgent  # noqa: E402
 from agents.synthesis_agent import SynthesisAgent  # noqa: E402
 from models.research_state import (  # noqa: E402
+    KnowledgeFinding,
     ResearchState,
     SearchResult,
     SubQuestion,
@@ -355,6 +356,180 @@ class SynthesisCitationTests(unittest.TestCase):
         agent.analyze_results(question, _search_results(), state)
 
         self.assertEqual(state.findings[0].sources, [])
+
+
+class _MultiFindingLLM:
+    """Returns one analysis with several distinct points."""
+
+    def __init__(self, findings, answer_indices=None):
+        self.findings = findings
+        self.answer_indices = [1] if answer_indices is None else answer_indices
+
+    def analyze_search_results(self, question, search_results, previous_findings=None):
+        return {
+            "answer": "The answer covering every point.",
+            "confidence": 0.8,
+            "source_indices": self.answer_indices,
+            "findings": self.findings,
+            "contradictions": [],
+            "gaps": [],
+            "needs_more_research": False,
+        }
+
+
+def _run_analysis(llm):
+    state = _finding_state()
+    question = state.get_question_by_id("q1")
+    SynthesisAgent(llm).analyze_results(question, _search_results(), state)
+    return state
+
+
+class MultiFindingTests(unittest.TestCase):
+    """One answer usually holds several separately citable points.
+
+    The report writes a section per finding, so collapsing an answer into a
+    single finding is what capped a report at one section per question.
+    """
+
+    def test_each_point_becomes_its_own_finding_with_its_own_sources(self):
+        state = _run_analysis(_MultiFindingLLM([
+            {"claim": "4-bit weights halve memory traffic.", "source_indices": [1]},
+            {"claim": "Calibration is required for outlier channels.", "source_indices": [2]},
+        ]))
+
+        self.assertEqual(len(state.findings), 2)
+        self.assertEqual(state.findings[0].sources, ["https://one.example"])
+        self.assertEqual(state.findings[1].sources, ["https://two.example"])
+        self.assertEqual(
+            [finding.content for finding in state.findings],
+            ["4-bit weights halve memory traffic.",
+             "Calibration is required for outlier channels."],
+        )
+
+    def test_a_point_that_names_no_sources_keeps_an_empty_list(self):
+        # The answer's own indices must not be copied onto a point that
+        # explicitly says nothing supports it.
+        state = _run_analysis(_MultiFindingLLM([
+            {"claim": "A sourced point.", "source_indices": [2]},
+            {"claim": "An unsourced projection.", "source_indices": []},
+        ]))
+
+        self.assertEqual(state.findings[1].sources, [])
+
+    def test_a_point_without_indices_inherits_the_answers_support(self):
+        state = _run_analysis(_MultiFindingLLM([
+            {"claim": "First point."},
+            {"claim": "Second point."},
+        ], answer_indices=[1, 2]))
+
+        self.assertEqual(state.findings[0].sources, [
+            "https://one.example", "https://two.example"
+        ])
+
+    def test_repeated_points_are_stored_once(self):
+        state = _run_analysis(_MultiFindingLLM([
+            {"claim": "4-bit weights halve memory traffic.", "source_indices": [1]},
+            {"claim": "4-bit weights halve the memory traffic", "source_indices": [2]},
+        ]))
+
+        self.assertEqual(len(state.findings), 1)
+        self.assertEqual(state.findings[0].sources, ["https://one.example"])
+
+    def test_a_point_already_found_in_an_earlier_pass_is_not_duplicated(self):
+        state = _finding_state()
+        state.findings.append(KnowledgeFinding(
+            content="4-bit weights halve memory traffic.",
+            sources=["https://one.example"], confidence=0.7, question_id="q1",
+        ))
+        llm = _MultiFindingLLM([
+            {"claim": "4-bit weights halve memory traffic", "source_indices": [1]},
+            {"claim": "Calibration is required for outlier channels.",
+             "source_indices": [2]},
+        ])
+
+        SynthesisAgent(llm).analyze_results(
+            state.get_question_by_id("q1"), _search_results(), state
+        )
+
+        self.assertEqual(len(state.findings), 2)
+        self.assertEqual(state.findings[1].content,
+                         "Calibration is required for outlier channels.")
+
+    def test_the_number_of_new_findings_per_pass_is_capped(self):
+        claims = [
+            {"claim": f"Distinct point number {i} about quantization.", "source_indices": [1]}
+            for i in range(6)
+        ]
+        self.assertEqual(len(_run_analysis(_MultiFindingLLM(claims)).findings), 4)
+
+    def test_model_that_ignores_the_findings_array_still_answers(self):
+        state = _run_analysis(_AnalysisLLM([1]))
+        self.assertEqual(len(state.findings), 1)
+        self.assertEqual(state.findings[0].content, "A supported answer.")
+
+
+class _DecomposeListLLM:
+    model = "fake"
+
+    def __init__(self, questions):
+        self.questions = questions
+
+    def decompose_query(self, main_query):
+        return {"sub_questions": [{"question": q} for q in self.questions]}
+
+
+class QuestionDedupeTests(unittest.TestCase):
+    """A restated question becomes its own finding and its own section."""
+
+    def test_a_reworded_repeat_of_an_earlier_question_is_dropped(self):
+        state = ResearchState(main_query="q", category_toggles={})
+        agent = QueryAnalyzerAgent(_DecomposeListLLM([
+            "What is the impact of 4-bit quantization on LLM accuracy?",
+            "How does 4-bit quantization affect LLM accuracy?",
+            "How much memory does 4-bit quantization save?",
+        ]))
+
+        questions = agent.decompose_main_query("quantization in LLMs", state)
+
+        self.assertEqual(len(questions), 2)
+        self.assertEqual(
+            [q.question for q in questions],
+            ["What is the impact of 4-bit quantization on LLM accuracy?",
+             "How much memory does 4-bit quantization save?"],
+        )
+
+    def test_a_short_background_question_is_not_treated_as_a_repeat(self):
+        state = ResearchState(main_query="q", category_toggles={})
+        agent = QueryAnalyzerAgent(_DecomposeListLLM([
+            "What is quantization?",
+            "How does 4-bit quantization affect LLM accuracy?",
+        ]))
+
+        self.assertEqual(
+            len(agent.decompose_main_query("quantization in LLMs", state)), 2
+        )
+
+    def test_a_follow_up_that_restates_a_queued_question_is_dropped(self):
+        agent = _agent()
+        state = ResearchState(main_query="q", category_toggles={})
+        state.add_question(SubQuestion(
+            id="q1", question="How does 4-bit quantization affect LLM accuracy?"
+        ))
+        analysis = {
+            "needs_more_research": True,
+            "follow_up_questions": [
+                "What is the impact of 4-bit quantization on LLM accuracy?",
+                "Which calibration datasets are used?",
+            ],
+            "gaps": [],
+        }
+
+        questions = agent.generate_follow_up_questions(
+            state.get_question_by_id("q1"), analysis, state
+        )
+
+        self.assertEqual([q.question for q in questions],
+                         ["Which calibration datasets are used?"])
 
 
 if __name__ == "__main__":

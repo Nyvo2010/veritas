@@ -21,7 +21,7 @@ from utils.tavily_client import TavilySearchClient
 from utils.llm_client import LLMClient
 from utils.sources import (
     canonical_url,
-    content_fingerprint,
+    duplicate_of,
     merge_result,
     prepare_results,
     select_for_analysis,
@@ -126,21 +126,20 @@ class SearchAgent:
                     ", ".join(f"{reason} x{count}" for reason, count in reasons.items()),
                 )
 
-            by_url = {}
-            by_text = {}
-            for existing in state.search_results:
-                by_url[canonical_url(existing.url)] = existing
-                fingerprint = content_fingerprint(existing)
-                if fingerprint:
-                    by_text[fingerprint] = existing
+            by_url = {
+                canonical_url(existing.url): existing
+                for existing in state.search_results
+            }
 
             results = []
             for result in usable:
                 key = canonical_url(result.url)
-                existing = by_url.get(key)
-                fingerprint = content_fingerprint(result)
-                if existing is None and fingerprint:
-                    existing = by_text.get(fingerprint)
+                # Same URL, or the same article republished elsewhere (the
+                # site chrome differs, the text does not). Both are one source
+                # in the bibliography, not two that agree.
+                existing = by_url.get(key) or duplicate_of(
+                    result, state.search_results
+                )
 
                 if existing is not None:
                     merge_result(existing, result)
@@ -149,8 +148,6 @@ class SearchAgent:
 
                 state.search_results.append(result)
                 by_url[key] = result
-                if fingerprint:
-                    by_text[fingerprint] = result
                 results.append(result)
 
             # The state keeps every usable source for the bibliography; the

@@ -746,6 +746,19 @@ Consider:
 - Weight high-quality sources over thin, promotional, or user-generated pages.
   If only low-quality sources support a claim, say so and lower the confidence.
 
+SPLIT THE ANSWER INTO FINDINGS
+An answer usually contains several distinct points, and each one is written up
+separately. In "findings", give each separate point its own entry:
+- Usually 2-4 entries. One entry is correct when the sources really do support
+a single point; never pad the list.
+- Each claim must be self-contained and specific enough to stand as a heading:
+name the mechanism, number, or trade-off it is about. "This matters for cost"
+is not a finding; "4-bit weights cut memory traffic roughly four-fold" is.
+- No two entries may restate the same point in different words, and none may
+summarise the whole answer.
+- A point the sources do not support gets an empty source_indices list; do not
+borrow another point's sources for it.
+
 Return JSON:
 {
     "observation": "Summary of what sources say ABOUT THIS SPECIFIC QUESTION",
@@ -754,6 +767,13 @@ Return JSON:
     "confidence": 0.0-1.0,
     "source_agreement": "high/medium/low",
     "source_indices": [1, 3],
+    "findings": [
+        {
+            "claim": "One distinct, self-contained point from the answer",
+            "source_indices": [1, 3],
+            "confidence": 0.0-1.0
+        }
+    ],
     "contradictions": ["list any contradictions found"],
     "gaps": ["list knowledge gaps DIRECTLY RELATED TO THIS QUESTION"],
     "follow_up_questions": ["questions that need more research WITHIN THIS TOPIC"],
@@ -761,10 +781,10 @@ Return JSON:
     "reasoning": "Why you need/don't need more research FOR THIS SPECIFIC QUESTION"
 }
 
-"source_indices" must be 1-based indices of the Search Results that directly
-support the answer. Include every result that supports part of it (usually
-2-4 distinct sources when the results allow); do not list a source you did not
-use."""
+Every "source_indices" list holds 1-based indices of the Search Results that
+directly support that claim. Include every result that supports part of it
+(usually 2-4 distinct sources when the results allow); do not list a source
+you did not use."""
 
         # Format search results. The pipeline already selected the strongest
         # subset; spend a real text budget on each one instead of reading only
@@ -799,7 +819,7 @@ use."""
         """
         system_prompt = """You are an expert at organizing research findings into SPECIFIC, DISTINCT themes that avoid redundancy.
 
-Analyze all findings and give each one a SHARPLY FOCUSED theme title and description. The report writes one section per finding, so do not invent themes for findings that do not exist, and do not merge several findings into one theme.
+Analyze all findings and group them into SHARPLY FOCUSED theme titles and descriptions. One theme may cover several findings when they make the same point in different words: repeating that point in two separate sections is the failure mode to avoid. Do not merge findings about different mechanisms, bit-widths, metrics, or trade-offs — those are different themes. Never invent themes for findings that do not exist.
 
 CRITICAL REQUIREMENTS:
 - Each theme must be SPECIFIC and DISTINCT - no overlap between themes
@@ -825,18 +845,29 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
         # Only the three fields the report uses are requested; the old prompt
         # also asked for key_points, sub_topics, unique_angle and two summary
         # strings that nothing read, which cost output tokens on every run.
+        # Findings are one per analysis point now, so there can be many more
+        # of them than there used to be. The prompt is bounded: every finding
+        # still gets a label, but the tail does not grow the request forever.
+        max_findings = 40
+        listed = list(all_findings or [])[:max_findings]
+        if len(all_findings or []) > max_findings:
+            log.info(
+                "themes: analysing the first %s of %s findings",
+                max_findings, len(all_findings),
+            )
         findings_text = "\n\n".join([
-            f"{f.get('id') or 'F' + str(i + 1)}: {f.get('content', '')[:600]}"
-            for i, f in enumerate(all_findings)
+            f"{f.get('id') or 'F' + str(i + 1)}: {f.get('content', '')[:500]}"
+            for i, f in enumerate(listed)
         ])
 
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": (
                 f"Findings to analyze (each is labelled with its id):\n\n{findings_text}\n\n"
-                "Give every finding its own SPECIFIC, NON-OVERLAPPING theme. Focus on unique "
-                "mechanisms, dynamics, or insights. In related_finding_ids, list "
-                "only the ids (e.g. F2) of findings that theme is actually about."
+                "Give each theme a SPECIFIC, NON-OVERLAPPING focus. Cover every finding: "
+                "either as its own theme or grouped with the findings that make the same "
+                "point. In related_finding_ids, list only the ids (e.g. F2) of findings "
+                "that theme is actually about."
             )}
         ]
 
@@ -850,6 +881,7 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
         main_query: str,
         style: str = "comprehensive",
         evidence_sources: List[Dict] = None,
+        other_sections: List[str] = None,
     ) -> str:
         """Generate one report section (sync) with primary -> fallback retry."""
         return self._with_fallback(
@@ -860,6 +892,7 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
             main_query,
             style,
             evidence_sources,
+            other_sections,
         )
 
     async def generate_section_async(
@@ -870,6 +903,7 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
         main_query: str,
         style: str = "comprehensive",
         evidence_sources: List[Dict] = None,
+        other_sections: List[str] = None,
     ) -> str:
         """Generate one report section without blocking the event loop.
 
@@ -886,6 +920,7 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
             main_query,
             style,
             evidence_sources,
+            other_sections,
         )
 
     def _generate_section_sync(
@@ -896,6 +931,7 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
         main_query: str,
         style: str = "comprehensive",
         evidence_sources: List[Dict] = None,
+        other_sections: List[str] = None,
     ) -> str:
         """Generate a single report section.
 
@@ -905,13 +941,22 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
             relevant_findings: Findings fed to this section.
             main_query: The user's original question.
             style: Writing style (comprehensive, concise, technical).
+            other_sections: Headings of the report's other sections, so this
+                one does not spend its words on their material.
         """
+        covered = ""
+        if other_sections:
+            covered = (
+                "\nOther sections in this report (do not repeat their material; "
+                "this section must stand on its own ground):\n- "
+                + "\n- ".join(str(title) for title in other_sections[:12])
+            )
 
         system_prompt = f"""You are an expert analyst writing one section of a research report.
 
 Scope: this section speaks only to the main research query — "{main_query}".
 Target style: {style}. Stay on topic, do not drift to tangentially related
-subjects, and base every claim on the evidence provided.
+subjects, and base every claim on the evidence provided.{covered}
 
 Write 900-1400 words of original analysis that:
 - examines the specific mechanisms, dynamics, or patterns behind this theme
@@ -994,7 +1039,12 @@ the evidence allows, and cite no single source more than three times in this
 section: one source repeated down a whole argument claims more agreement than
 the evidence has. A citation is not decoration: attach it to the sentence it
 supports. If the source evidence and the findings disagree, say so rather than
-averaging them."""
+averaging them.
+
+GROUNDING: every subsection needs at least one sentence carrying a citation.
+A claim that no supplied source supports should be removed, not written
+uncited — a paragraph of plausible prose without a marker reads as evidence
+and is not."""
 
         messages = [
             {"role": "system", "content": system_prompt},

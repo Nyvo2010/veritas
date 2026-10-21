@@ -9,10 +9,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from typing import List, Dict
 
+import logging
+import uuid
+
 from models.research_state import SubQuestion, ResearchState, QuestionStatus
 from utils.llm_client import LLMClient
-from utils.text import as_bool, as_int, string_list
-import uuid
+from utils.text import as_bool, as_int, is_near_duplicate, string_list
+
+log = logging.getLogger("veritas.query")
 
 class QueryAnalyzerAgent:
     """
@@ -22,6 +26,20 @@ class QueryAnalyzerAgent:
     
     def __init__(self, llm_client: LLMClient):
         self.llm = llm_client
+
+    @staticmethod
+    def _is_duplicate(state: ResearchState, question_text: str) -> bool:
+        """True when *question_text* paraphrases a question already queued.
+
+        Decomposition and follow-ups both restate the main query in different
+        words, and each duplicate becomes its own finding and report section
+        talking about the same thing. The check is word overlap, not exact
+        text, so a reworded repeat is caught too.
+        """
+        return any(
+            is_near_duplicate(question_text, existing.question)
+            for existing in state.questions
+        )
     
     def validate_query(self, query: str) -> bool:
         """
@@ -77,6 +95,9 @@ class QueryAnalyzerAgent:
                 continue  # skip malformed entries rather than crash later
             question_text = str(sq_data.get("question") or "").strip()
             if not question_text:
+                continue
+            if self._is_duplicate(state, question_text):
+                log.debug("skipping duplicate question: %r", question_text)
                 continue
             requested_depth = str(
                 sq_data.get("search_depth") or ""
@@ -146,6 +167,9 @@ class QueryAnalyzerAgent:
 
         # Create SubQuestions from follow-ups
         for i, fq in enumerate(follow_ups[:3]):  # Limit to 3 follow-ups
+            if self._is_duplicate(state, fq):
+                log.debug("skipping duplicate follow-up: %r", fq)
+                continue
             sub_q = SubQuestion(
                 id=str(uuid.uuid4()),
                 question=fq,

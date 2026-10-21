@@ -18,9 +18,15 @@ from models.research_state import (
     ResearchState
 )
 from utils.llm_client import LLMClient
-from utils.text import clip, string_list
+from utils.text import as_int, clip, is_near_duplicate, string_list
 
 log = logging.getLogger("veritas.synthesis")
+
+# One analysis pass describes a question; the distinct points inside it become
+# separate findings, because the report writes one section per finding. Four
+# covers the usual "several things are true here" answer without turning a
+# single search into a report of its own.
+MAX_FINDINGS_PER_ANALYSIS = 4
 
 
 class SynthesisAgent:
@@ -92,7 +98,7 @@ class SynthesisAgent:
             if hasattr(result, "analyzed"):
                 result.analyzed = True
 
-        # Extract and store knowledge finding. Model output is untrusted: a
+        # Extract and store knowledge findings. Model output is untrusted: a
         # field requested as a list can arrive as one string, which would
         # otherwise be iterated character by character.
         answer = str(analysis.get('answer') or '').strip()
@@ -103,39 +109,18 @@ class SynthesisAgent:
                 confidence = 0.5
             confidence = max(0.0, min(1.0, confidence))
 
-            # The analysis names the result indices that support its answer.
-            # Keeping those URLs (rather than a blind slice of the first five)
-            # is what makes a finding's citations traceable later.
-            cited_urls = []
-            for raw_index in analysis.get('source_indices', []) or []:
-                try:
-                    index = int(raw_index) - 1
-                except (TypeError, ValueError):
-                    continue
-                if 0 <= index < len(search_results):
-                    url = search_results[index].url
-                    if url and url not in cited_urls:
-                        cited_urls.append(url)
-            # No indices means the model named no support. Presenting the first
-            # five results as that support made every claim look grounded when
-            # it was not; the section still receives the analysed pages for its
-            # question as citable evidence, so nothing is lost by staying empty.
-
-            finding = KnowledgeFinding(
-                content=answer,
-                sources=cited_urls[:5],
-                confidence=confidence,
-                question_id=question.id,
-                contradictions=string_list(analysis.get('contradictions')),
+            findings = self._extract_findings(
+                analysis, question, search_results, state, confidence
             )
-            state.findings.append(finding)
-            
+            state.findings.extend(findings)
+
             # Update question
             question.answer = answer
-            
+
             # Show the answer, clipped: the panel keeps one line per entry.
             if ui_manager:
-                ui_manager.add_message(f"Insight: {clip(answer)}", style="white")
+                label = "Insight" if len(findings) == 1 else f"{len(findings)} insights"
+                ui_manager.add_message(f"{label}: {clip(answer)}", style="white")
         
         # Store identified gaps
         for gap_desc in string_list(analysis.get('gaps')):
@@ -148,7 +133,94 @@ class SynthesisAgent:
             state.gaps.append(gap)
         
         return analysis
-    
+
+    @staticmethod
+    def _cited_urls(raw_indices, search_results, limit: int = 5) -> List[str]:
+        """URLs behind a model-supplied list of 1-based result indices."""
+        urls: List[str] = []
+        if isinstance(raw_indices, (str, int)):
+            raw_indices = [raw_indices]
+        if not isinstance(raw_indices, list):
+            return urls
+        for raw_index in raw_indices:
+            index = as_int(raw_index, default=-1) - 1
+            if 0 <= index < len(search_results):
+                url = search_results[index].url
+                if url and url not in urls:
+                    urls.append(url)
+        return urls[:limit]
+
+    def _extract_findings(
+        self,
+        analysis: Dict,
+        question: SubQuestion,
+        search_results: List[SearchResult],
+        state: ResearchState,
+        answer_confidence: float,
+    ) -> List[KnowledgeFinding]:
+        """One finding per distinct point the analysis named.
+
+        Models that ignore the ``findings`` array still answer with ``answer``;
+        that is one finding, exactly as before. A point that names no sources
+        keeps an empty list: presenting the first results as its support made
+        every claim look grounded when it was not.
+        """
+        answer = str(analysis.get("answer") or "").strip()
+        answer_urls = self._cited_urls(analysis.get("source_indices"), search_results)
+        contradictions = string_list(analysis.get("contradictions"))
+
+        raw_findings = analysis.get("findings")
+        if not isinstance(raw_findings, list):
+            raw_findings = []
+
+        candidates = []
+        for item in raw_findings:
+            if not isinstance(item, dict):
+                continue
+            claim = str(
+                item.get("claim") or item.get("content") or item.get("answer") or ""
+            ).strip()
+            if not claim:
+                continue
+            # A point with no indices field of its own inherits the answer's
+            # support (the same model named it for the same search); an
+            # explicit empty list means "nothing supports this".
+            if "source_indices" in item:
+                urls = self._cited_urls(item.get("source_indices"), search_results)
+            else:
+                urls = list(answer_urls)
+            try:
+                item_confidence = float(item.get("confidence", answer_confidence))
+            except (TypeError, ValueError):
+                item_confidence = answer_confidence
+            candidates.append((claim, urls, max(0.0, min(1.0, item_confidence))))
+
+        if not candidates and answer:
+            candidates = [(answer, answer_urls, answer_confidence)]
+
+        existing = [f.content for f in state.get_findings_for_question(question.id)]
+        findings: List[KnowledgeFinding] = []
+        kept_text = []
+        for claim, urls, item_confidence in candidates:
+            if len(findings) >= MAX_FINDINGS_PER_ANALYSIS:
+                log.info(
+                    "analysis for %r returned more than %s findings; extra points dropped",
+                    clip(question.question, 60), MAX_FINDINGS_PER_ANALYSIS,
+                )
+                break
+            if any(is_near_duplicate(claim, text) for text in existing + kept_text):
+                log.debug("dropping duplicate finding: %r", clip(claim, 80))
+                continue
+            kept_text.append(claim)
+            findings.append(KnowledgeFinding(
+                content=claim,
+                sources=urls,
+                confidence=item_confidence,
+                question_id=question.id,
+                contradictions=list(contradictions),
+            ))
+        return findings
+
     def cross_reference_findings(
         self,
         state: ResearchState,
@@ -195,14 +267,26 @@ Return JSON:
     ],
     "overall_confidence": 0.0-1.0,
     "reliability_assessment": "Your assessment of source reliability"
-}"""
+}
+
+Write reliability_assessment for a reader of the final report. Refer to the
+sources and what they say, never to internal finding numbers ("Finding 3"):
+the reader has not seen them."""
         
+        # Bounded: one analysis pass now yields several findings, and the
+        # cross-reference prompt used to serialise every one of them in full.
+        max_findings = 30
         findings_text = "\n\n".join([
-            f"Finding {i}: {f.content}\n"
+            f"Finding {i}: {clip(f.content, 500)}\n"
             f"Confidence: {f.confidence}\n"
             f"Sources: {', '.join(f.sources[:2])}"
-            for i, f in enumerate(state.findings)
+            for i, f in enumerate(state.findings[:max_findings])
         ])
+        if len(state.findings) > max_findings:
+            log.info(
+                "cross-reference: analysing the first %s of %s findings",
+                max_findings, len(state.findings),
+            )
         
         messages = [
             {"role": "system", "content": system_prompt},
