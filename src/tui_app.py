@@ -1786,7 +1786,7 @@ def activity_rows() -> int:
     Fixed chrome: outer margin (1) + header card (padding 1, title, query,
     phase, padding 1 = 5) + gap (1) + activity card (padding 1, title, log,
     padding 1 = 3) + gap (1) + progress card (padding 1, title, blank, bar,
-    blank, status, clock, timing, padding 2 = 9) + hint (1) = 21 rows, so the
+    blank, status, clock, timing, padding 1 = 9) + hint (1) = 21 rows, so the
     log takes the rest. The run screen drops the blank line under its card
     labels to pay for the padding.
     """
