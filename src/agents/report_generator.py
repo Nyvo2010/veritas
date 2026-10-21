@@ -48,6 +48,25 @@ MAX_CITATIONS_PER_SOURCE = 3
 
 _CITATION_MARKER_RE = re.compile(r"\[Source (\d+)\]")
 
+# Where a sentence ends, for the support checker. The period must be followed
+# by whitespace and something that starts a sentence: "0.01%" and "99.99" are
+# therefore never a boundary, which the old "any full stop" rule got wrong —
+# it handed the checker fragments like "01%, spike as high as ±30".
+_SENTENCE_END_RE = re.compile(r"[.!?][\"'”’)]*(?=\s+[\"'“‘(]?[A-Z])")
+
+# Periods that belong to an abbreviation, not to the end of a sentence.
+# "e.g. 2x" and "Smith et al. [Source 9]" otherwise cut the claim in half;
+# a one-letter word ("J.") is treated the same way, as an initial.
+_ABBREVIATIONS = frozenset({
+    "e.g", "i.e", "al", "vs", "cf", "fig", "figs", "eq", "no", "nos",
+    "approx", "ca", "resp", "sec", "ch", "vol", "pp", "dr", "mr", "mrs",
+    "ms", "prof", "inc", "ltd", "co", "st", "esp",
+})
+
+# Below this, the extracted text is not a claim the checker can judge (a
+# marker that opens its own sentence), so the previous sentence is included.
+_MIN_CLAIM_CHARS = 40
+
 
 def _clean_title(text: str) -> str:
     """A heading, not a transcript: one line, sentence case, no trailing mark.
@@ -72,25 +91,93 @@ def _clean_title(text: str) -> str:
     return title.rstrip(" .")
 
 
+def _sentence_boundaries(text: str) -> List[int]:
+    """Offsets just past each real sentence end, abbreviations excluded.
+
+    A line break counts too: bullets and headings carry no full stop, and a
+    claim that swallowed the rest of a list would be as unusable as a
+    fragment.
+    """
+    ends = {index + 1 for index, char in enumerate(text) if char == "\n"}
+    for match in _SENTENCE_END_RE.finditer(text):
+        if _closes_abbreviation(text, match.start()):
+            continue
+        ends.add(match.end())
+    return sorted(ends)
+
+
+def _closes_abbreviation(text: str, dot: int) -> bool:
+    """True when the period at *dot* ends an abbreviation or an initial."""
+    word = ""
+    index = dot - 1
+    while index >= 0 and (text[index].isalnum() or text[index] == "&"):
+        word = text[index] + word
+        index -= 1
+    word = word.lower()
+    if word in _ABBREVIATIONS:
+        return True
+    return len(word) == 1 and word.isalpha()
+
+
+def _claim_text(text: str, marker_start: int, bounds: List[int]) -> str:
+    """The sentence a marker sits in, widened when that is not a claim.
+
+    A marker often closes its sentence, so the sentence before it is the one
+    that carries the claim. One that opens a sentence reaches forward to the
+    next boundary instead. When the result is still too short to judge, the
+    previous sentence comes along.
+    """
+    starts = [0] + bounds
+    ends = bounds + [len(text)]
+    index = 0
+    for position, start in enumerate(starts):
+        if start <= marker_start:
+            index = position
+    end = ends[index]
+    start = starts[index]
+    # Markers that lead a sentence: the claim starts at the marker and runs to
+    # the next boundary, but the sentence opening usually belongs with it.
+    # Never reach back past a line break — that merges separate bullets into
+    # one claim, which is as wrong as a fragment.
+    while end - start < _MIN_CLAIM_CHARS and index > 0:
+        if text[starts[index] - 1] == "\n":
+            break
+        index -= 1
+        start = starts[index]
+    return text[start:end].strip()
+
+
+def _clip_claim(text: str, limit: int = 400) -> str:
+    """Cap a claim at a word boundary.
+
+    400 characters clears almost every sentence in a report; past that the cut
+    lands between words, because a claim that stops mid-word reads to the
+    checker like text that lost its meaning.
+    """
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0] + " …"
+
+
 def _cited_claims(content: str) -> List[Dict]:
     """One entry per citation marker, in document order.
 
     ``span`` is the marker's position (including the space before it, so
-    removing it cannot leave "claim ."), and ``sentence`` is the surrounding
-    claim shown to the support checker.
+    removing it cannot leave "claim ."), and ``sentence`` is the claim shown
+    to the support checker: the whole sentence the marker belongs to, never a
+    fragment — a checker handed "[Source 9] on A100." rejects a citation that
+    the source does support.
     """
     text = content or ""
+    bounds = _sentence_boundaries(text)
     claims: List[Dict] = []
     for index, match in enumerate(_CITATION_MARKER_RE.finditer(text)):
-        start = max(text.rfind(".", 0, match.start()), text.rfind("\n", 0, match.start())) + 1
-        end = text.find(".", match.end())
-        if end < 0:
-            end = len(text)
         span_start = match.start() - 1 if match.start() and text[match.start() - 1] == " " else match.start()
         claims.append({
             "id": f"M{index + 1}",
             "source": int(match.group(1)),
-            "sentence": clip(text[start:end + 1].strip(), 300),
+            "sentence": _clip_claim(_claim_text(text, match.start(), bounds)),
             "span": (span_start, match.end()),
         })
     return claims
