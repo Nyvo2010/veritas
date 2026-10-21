@@ -651,10 +651,12 @@ class _ReportPipelineLLM:
         self.section_content = section_content
         self.support_claims = None
         self.support_evidence = None
+        self.support_thread = None
 
     def check_citation_support(self, claims, evidence):
         self.support_claims = claims
         self.support_evidence = evidence
+        self.support_thread = threading.current_thread().name
         if self.support_error:
             raise RuntimeError("judge unavailable")
         return list(self.unsupported)
@@ -791,6 +793,87 @@ class ReportCitationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([claim["id"] for claim in llm.support_claims], ["M1", "M2"])
         self.assertTrue(llm.support_evidence)
 
+    def _one_section_state(self):
+        state = make_state("a question")
+        state.search_results = [SearchResult(
+            url="https://example.com/paper", title="Paper",
+            content="paper " * 100, score=0.9, category="educational",
+        )]
+        state.findings = [KnowledgeFinding(
+            content="A point.", sources=["https://example.com/paper"],
+            confidence=0.8, question_id="q1",
+        )]
+        return state
+
+    async def test_the_header_states_what_the_citation_audit_checked(self):
+        llm = _ReportPipelineLLM(
+            unsupported=["M2"],
+            section_content=(
+                "A supported claim [Source 1]. "
+                "A stretched claim [Source 1]."
+            ),
+        )
+
+        report = await ReportGeneratorAgent(llm).generate_report(
+            self._one_section_state()
+        )
+
+        self.assertIn("Source check: 1 of 2 section citations verified", report)
+
+    async def test_an_unavailable_judge_does_not_claim_an_audit(self):
+        llm = _ReportPipelineLLM(
+            support_error=True,
+            section_content="A supported claim [Source 1].",
+        )
+
+        report = await ReportGeneratorAgent(llm).generate_report(
+            self._one_section_state()
+        )
+
+        # Zero checked means no audit ran; claiming "1 of 1 supported" would
+        # turn a judge outage into a clean bill of health.
+        self.assertNotIn("Source check", report)
+
+    async def test_a_partial_audit_is_not_summed_up_as_a_whole_report(self):
+        """One section losing its judge must not leave a header that implies
+        every section was checked."""
+
+        class _FlakyJudge(_ReportPipelineLLM):
+            calls = 0
+
+            def check_citation_support(self, claims, evidence):
+                type(self).calls += 1
+                if type(self).calls == 2:
+                    raise RuntimeError("judge went away")
+                return super().check_citation_support(claims, evidence)
+
+        state = make_state("a question")
+        state.search_results = [SearchResult(
+            url="https://example.com/paper", title="Paper",
+            content="paper " * 100, score=0.9, category="educational",
+        )]
+        for i in range(2):
+            state.findings.append(KnowledgeFinding(
+                content=f"point {i}",
+                sources=["https://example.com/paper"],
+                confidence=0.8, question_id=f"q{i}",
+            ))
+
+        report = await ReportGeneratorAgent(_FlakyJudge()).generate_report(state)
+
+        self.assertIn("## ", report)
+        self.assertNotIn("Source check", report)
+
+    async def test_the_support_check_runs_off_the_event_loop_thread(self):
+        """The judge is a blocking model call; on the loop it stalls every
+        other section that is still waiting for its response."""
+        llm = _ReportPipelineLLM(section_content="A claim [Source 1].")
+
+        await ReportGeneratorAgent(llm).generate_report(self._one_section_state())
+
+        self.assertIsNotNone(llm.support_thread)
+        self.assertNotEqual(llm.support_thread, threading.current_thread().name)
+
     async def test_a_failed_support_check_keeps_every_marker(self):
         state = make_state("a question")
         state.search_results = [SearchResult(
@@ -843,6 +926,31 @@ class ReportCitationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("unanswerable thing", report)
         self.assertIn("No sources were cited", report)
         self.assertIn("Questions: 0 answered of 1", report)
+
+
+class SupportJudgeReplyTests(unittest.TestCase):
+    """A reply that is not a verdict must not be read as "all supported"."""
+
+    class _ReplyLLM(LLMClient):
+        def __init__(self, reply):
+            self.reply = reply
+
+        def chat_json(self, *args, **kwargs):
+            return self.reply
+
+    CLAIMS = [{"id": "M1", "source": 1, "sentence": "A claim."}]
+    EVIDENCE = [{"number": 1, "title": "Paper", "content": "The excerpt."}]
+
+    def test_a_reply_without_the_key_is_a_failure(self):
+        llm = self._ReplyLLM({"notes": "looks fine to me"})
+        with self.assertRaises(ValueError):
+            llm.check_citation_support(self.CLAIMS, self.EVIDENCE)
+
+    def test_an_empty_list_is_a_real_verdict(self):
+        llm = self._ReplyLLM({"unsupported": []})
+        self.assertEqual(
+            llm.check_citation_support(self.CLAIMS, self.EVIDENCE), []
+        )
 
 
 class CitationCapTests(unittest.TestCase):

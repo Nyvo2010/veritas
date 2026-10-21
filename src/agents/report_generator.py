@@ -312,9 +312,12 @@ class ReportGeneratorAgent:
         if advance:
             advance(1, "Report themes identified")
 
-        # Step 2: Generate sections in parallel
+        # Step 2: Generate sections in parallel. ``audit`` is filled by the
+        # support check; the header states what it examined, because a report
+        # that silently deleted markers reads as more verified than it is.
+        audit = {"checked": 0, "dropped": 0, "missed": 0}
         sections, failed = await self._generate_sections_parallel(
-            state, themes, style, ui_manager, source_numbers
+            state, themes, style, ui_manager, source_numbers, audit=audit
         )
         if failed:
             note("warn", f"{failed} of {len(sections) + failed} sections did not complete")
@@ -369,6 +372,7 @@ class ReportGeneratorAgent:
         final_report = self._assemble_report(
             state, executive_summary, sections, gaps_section,
             source_entries, cross_reference_section=cross_reference_section,
+            citation_audit=audit,
         )
         if advance:
             advance(1, "Report assembled")
@@ -416,13 +420,17 @@ class ReportGeneratorAgent:
         style: str,
         ui_manager=None,
         source_numbers: dict = None,
+        audit: Dict = None,
     ) -> tuple:
         """
         Generate report sections in parallel using asyncio.
 
         Returns ``(sections, failed_count)``. Sections are bounded by their
         own timeout rather than one shared deadline, so a single stall costs
-        one section instead of the entire report.
+        one section instead of the entire report. ``audit`` is an out-parameter
+        the caller owns; when given, it collects ``checked`` and ``dropped``
+        citation counts across sections so the report can state what the
+        support check actually examined.
         """
         tasks = []
         theme_list = themes.get("themes") if isinstance(themes, dict) else None
@@ -607,11 +615,11 @@ class ReportGeneratorAgent:
                     log.warning("section %r timed out after %.0fs", title, SECTION_TIMEOUT)
                     note("warn", f"Section timed out after {SECTION_TIMEOUT:.0f}s: {clip(title)}")
                     return (order, title, SECTION_TIMEOUT_PLACEHOLDER.format(seconds=SECTION_TIMEOUT),
-                            section_urls, True)
+                            section_urls, True, 0, 0)
                 except Exception as e:
                     log.error("section %r failed: %s", title, e, exc_info=True)
                     note("err", f"Section failed: {clip(title)} ({clip(str(e), 60)})")
-                    return order, title, f"[Section generation failed: {e}]", section_urls, True
+                    return order, title, f"[Section generation failed: {e}]", section_urls, True, 0, 0
                 duration = time.perf_counter() - started
                 # Every marker in the body must resolve to a source that was
                 # actually supplied for this section and exists in the report
@@ -622,13 +630,16 @@ class ReportGeneratorAgent:
                     allowed_numbers=section_numbers,
                 )
                 content = _strip_duplicate_heading(content, title)
-                content, unsupported = self._check_support(
-                    content, title, evidence_sources
+                # The check is a blocking model call. Run it on a worker thread:
+                # calling it directly stalled the event loop for its whole
+                # duration, so no other section could finish meanwhile.
+                content, checked, unsupported = await asyncio.to_thread(
+                    self._check_support, content, title, evidence_sources
                 )
                 if unsupported:
                     log.info(
-                        "section %r: dropped %s unsupported citation(s)",
-                        title, unsupported,
+                        "section %r: dropped %s of %s checked citation(s) as unsupported",
+                        title, unsupported, checked,
                     )
                 content, trimmed = _cap_source_citations(content)
                 if trimmed:
@@ -642,7 +653,7 @@ class ReportGeneratorAgent:
                 advance = getattr(ui_manager, "advance", None)
                 if callable(advance):
                     advance(1, f"Completed section: {clip(title, 40)}")
-                return order, title, content, section_urls, False
+                return order, title, content, section_urls, False, checked, unsupported
 
         results = await asyncio.gather(*[
             generate_with_progress(order, title, task, numbers, urls, evidence)
@@ -650,8 +661,19 @@ class ReportGeneratorAgent:
         ], return_exceptions=False)
 
         failed = 0
-        for order, title, content, section_urls, failed_section in sorted(results, key=lambda x: x[0]):
+        for order, title, content, section_urls, failed_section, checked, dropped in sorted(
+            results, key=lambda x: x[0]
+        ):
             failed += 1 if failed_section else 0
+            if audit is not None:
+                # A section that could not be audited is counted, not dropped:
+                # its citations left the denominator would make a partial
+                # audit read as a complete one.
+                if checked is None:
+                    audit["missed"] = audit.get("missed", 0) + 1
+                else:
+                    audit["checked"] = audit.get("checked", 0) + checked
+                    audit["dropped"] = audit.get("dropped", 0) + dropped
             section = ReportSection(
                 title=title,
                 content=content,
@@ -707,14 +729,18 @@ class ReportGeneratorAgent:
         The checker names marker ids (M1, M2...) so the prose is never
         rewritten. It fails open: a transport or parse error keeps every
         marker, because an unverified citation is a smaller problem than a
-        silently unsupported report that looks verified.
+        silently unsupported report that looks verified. Returns
+        ``(content, checked, dropped)``, where ``checked`` is None when the
+        section could not be audited at all — different from 0, "there was
+        nothing to check", because the report header must not add up a
+        partial audit as if it were whole.
         """
         checker = getattr(self.llm, "check_citation_support", None)
         if not callable(checker):
-            return content, 0
+            return content, None, 0
         claims = _cited_claims(content)
         if not claims:
-            return content, 0
+            return content, 0, 0
         try:
             rejected = checker(
                 [
@@ -725,7 +751,7 @@ class ReportGeneratorAgent:
             )
         except Exception as e:  # noqa: BLE001 - fail open, log why
             log.warning("citation support check failed for %r: %s", title, e)
-            return content, 0
+            return content, None, 0
 
         wanted = {
             str(item.get("id", "") if isinstance(item, dict) else item)
@@ -737,8 +763,8 @@ class ReportGeneratorAgent:
             if claim["id"].lstrip("M") in wanted
         ]
         if not spans:
-            return content, 0
-        return _drop_marker_spans(content, spans), len(spans)
+            return content, len(claims), 0
+        return _drop_marker_spans(content, spans), len(claims), len(spans)
 
     @staticmethod
     def _overused_citations(sections: List[ReportSection], entries: list) -> List[tuple]:
@@ -1048,6 +1074,7 @@ class ReportGeneratorAgent:
         gaps_section: str,
         source_entries: list = None,
         cross_reference_section: str = "",
+        citation_audit: tuple = None,
     ) -> str:
         """Assemble the components as one properly structured Markdown file."""
         from datetime import datetime
@@ -1081,11 +1108,25 @@ class ReportGeneratorAgent:
             if failed:
                 answered_label += f" ({failed} failed)"
             meta_parts.append(answered_label)
-        meta_parts.extend([
-            f"Sources: {len(cited)} cited of {reviewed} reviewed",
-            f"Citations: {citation_count(body_for_count)}",
-            f"Generated: {generated}",
-        ])
+        meta_parts.append(f"Sources: {len(cited)} cited of {reviewed} reviewed")
+        meta_parts.append(f"Citations: {citation_count(body_for_count)}")
+        # Only when the check actually ran and examined something: an outage
+        # reports zero checked, so the header never implies an audit it did
+        # not perform. The summary is not part of this count.
+        # One number per citation marker, and only when every section was
+        # actually audited: a partial audit summed into one line would claim
+        # more coverage than the run had. "section citations" is literal —
+        # the executive summary is not part of this check.
+        audit = citation_audit or {}
+        checked = int(audit.get("checked") or 0)
+        dropped = int(audit.get("dropped") or 0)
+        missed = int(audit.get("missed") or 0)
+        if checked and not missed:
+            meta_parts.append(
+                f"Source check: {checked - dropped} of {checked} "
+                "section citations verified"
+            )
+        meta_parts.append(f"Generated: {generated}")
         meta = "  ·  ".join(meta_parts)
 
         report = f"""# Research Report: {state.main_query}

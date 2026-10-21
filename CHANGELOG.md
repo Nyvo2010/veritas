@@ -4,6 +4,17 @@ Notable changes per release. This project follows [Semantic Versioning](https://
 
 ## Unreleased
 
+- The citation support check runs on a worker thread. It is a blocking model
+  call, and running it on the event loop held up every other section that was
+  still waiting for its reply: a three-iteration run spent 19s in report
+  generation where the same work took 53s.
+- The report header states what that check examined — `Source check: 28 of 48
+  section citations verified`. It is left out when any section could not be
+  audited, so a partial audit is never summed up as a whole one, and a reply
+  that is not a verdict counts as a failure rather than as "nothing rejected".
+- The ACL Anthology, ACL, OpenReview, JMLR, NeurIPS, ICLR, AAAI and IJCAI
+  hosts are classified as academic. A peer-reviewed ACL paper used to print as
+  "Web page" and rank with the web prior.
 - The run screen's three cards share one padding rule: a blank row above the
   title and below the last line, so no text touches the tinted edge. The
   progress bar gets a blank row of its own above and below, the blank line

@@ -211,6 +211,10 @@ class SourceTypeTests(unittest.TestCase):
             "https://docs.python.org/3/library/re.html": "docs",
             "https://www.bbc.com/news/science": "news",
             "https://vendor.example/blog/post": "web",
+            # Venue hosts, not just publisher hosts: an ACL Anthology PDF is a
+            # peer-reviewed paper and must not rank with the web prior.
+            "https://aclanthology.org/2025.naacl-long.267.pdf": "academic",
+            "https://openreview.net/forum?id=abc": "academic",
         }
         for url, expected in cases.items():
             with self.subTest(url=url):

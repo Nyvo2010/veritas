@@ -109,6 +109,11 @@ _ACADEMIC_HOSTS = (
     "plos.org", "frontiersin.org", "cell.com", "elifesciences.org",
     "tandfonline.com", "sagepub.com", "wiley.com", "onlinelibrary.wiley.com",
     "researchgate.net", "scholar.google.com", "semanticscholar.org",
+    # The venues themselves, not just their publishers: an ACL Anthology PDF
+    # used to print as "Web page" and rank with the web prior.
+    "aclanthology.org", "aclweb.org", "openreview.net", "jmlr.org",
+    "proceedings.mlr.press", "neurips.cc", "papers.nips.cc", "iclr.cc",
+    "aaai.org", "ijcai.org",
 )
 _INSTITUTION_HOSTS = (
     "who.int", "un.org", "worldbank.org", "imf.org", "iea.org", "oecd.org",

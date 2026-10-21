@@ -700,7 +700,13 @@ class LLMClient:
         )
         unsupported = parsed.get("unsupported") if isinstance(parsed, dict) else None
         if not isinstance(unsupported, list):
-            return []
+            # A reply without the key is a failed check, not "nothing to
+            # reject". Returning [] here would let a broken judge look like a
+            # clean audit in the report header; the caller fails open instead.
+            raise ValueError(
+                "support check returned no unsupported list: "
+                + clip(str(parsed), 120)
+            )
         return [
             str(item.get("id", "") if isinstance(item, dict) else item)
             for item in unsupported
