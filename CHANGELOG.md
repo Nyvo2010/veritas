@@ -4,6 +4,15 @@ Notable changes per release. This project follows [Semantic Versioning](https://
 
 ## Unreleased
 
+- The citation support check is given the whole sentence a marker belongs to.
+  Sentence starts were found by taking everything after the last full stop,
+  which lands inside `0.01%`, `e.g.` and `et al.`, so the checker was asked to
+  judge fragments like `[Source 9] on A100.` and rejected citations the
+  sources did support — one 2026-10-21 run lost 81 of 119 markers that way.
+  Claims are now cut at sentence ends and line breaks only, widen to the
+  previous sentence when a marker leads its own sentence, never cross a line,
+  and stop between words rather than mid-word at the 400-character cap.
+
 - The citation support check runs on a worker thread. It is a blocking model
   call, and running it on the event loop held up every other section that was
   still waiting for its reply: a three-iteration run spent 19s in report

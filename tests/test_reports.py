@@ -24,6 +24,7 @@ from main import DeepResearchAgent  # noqa: E402
 from agents.report_generator import (  # noqa: E402
     ReportGeneratorAgent,
     _cap_source_citations,
+    _cited_claims,
     _clean_title,
     _select_excerpt,
 )
@@ -974,6 +975,65 @@ class CitationCapTests(unittest.TestCase):
 
         self.assertEqual(removed, 3)
         self.assertEqual(capped, "A [Source 1]. B. C. D.")
+
+
+class ClaimExtractionTests(unittest.TestCase):
+    """The checker judges one sentence; a fragment gets rejected wrongly.
+
+    The first version took everything after the last full stop, which lands
+    inside "0.01%", "e.g." and "et al.", so the judge was shown things like
+    "[Source 9] on A100." and answered unsupported.
+    """
+
+    def claim(self, text):
+        claims = _cited_claims(text)
+        self.assertEqual(len(claims), 1)
+        return claims[0]["sentence"]
+
+    def test_a_decimal_does_not_start_the_claim(self):
+        sentence = (
+            "Activation values sit between -1.0 and +1.0, but 0.01% spike as high "
+            "as ±30 and crush the resolution of the rest [Source 6]."
+        )
+        self.assertEqual(self.claim(sentence), sentence)
+
+    def test_an_abbreviation_does_not_start_the_claim(self):
+        sentence = "INT8 doubles throughput on Ampere (e.g. 2x over FP16) [Source 5]."
+        self.assertEqual(self.claim(sentence), sentence)
+
+    def test_a_citation_never_ends_up_as_the_start_of_the_claim(self):
+        sentence = "The 8-bit path is stable, as shown by Smith et al. [Source 9] on A100."
+        self.assertEqual(self.claim(sentence), sentence)
+
+    def test_a_marker_leading_a_sentence_keeps_the_claim_it_closes(self):
+        sentence = (
+            "[Source 2] This sentence opens with its marker and makes a long claim "
+            "about throughput."
+        )
+        self.assertEqual(self.claim(sentence), sentence)
+
+    def test_two_markers_in_one_sentence_share_it(self):
+        claims = _cited_claims(
+            "Mixed precision keeps outliers in FP16 [Source 6]. This preserves "
+            "fidelity because the range stays wide [Source 4]."
+        )
+        self.assertEqual([c["source"] for c in claims], [6, 4])
+        self.assertTrue(claims[1]["sentence"].startswith("This preserves fidelity"))
+
+    def test_a_bullet_does_not_swallow_the_next_one(self):
+        claims = _cited_claims(
+            "- Bandwidth halves with INT8 [Source 3]\n- Latency drops too [Source 2]"
+        )
+        self.assertEqual(claims[0]["sentence"], "- Bandwidth halves with INT8 [Source 3]")
+        self.assertEqual(claims[1]["sentence"], "- Latency drops too [Source 2]")
+
+    def test_a_long_claim_is_cut_between_words(self):
+        sentence = ("word " * 200) + "[Source 1]."
+        claim = self.claim(sentence)
+
+        self.assertLessEqual(len(claim), 402)
+        self.assertTrue(claim.endswith("…"))
+        self.assertNotIn("wor …", claim)
 
 
 class SectionTitleTests(unittest.TestCase):
