@@ -29,7 +29,7 @@ from agents.report_generator import ReportGeneratorAgent
 from utils.llm_client import LLMClient
 from utils.tavily_client import TavilySearchClient
 from utils.sources import build_source_registry, number_for
-from utils.text import as_bool, clip
+from utils.text import as_bool, clip, is_near_duplicate
 from utils.ui_manager import UIManager
 from ui.theme import format_duration
 from settings import load_settings, resolve_api_keys, resolve_llm, reports_dir as resolve_reports_dir
@@ -55,6 +55,19 @@ def _ui_log(ui, level: str, text: str) -> None:
         return
     log.debug("ui[%s] %s", level, text)
     ui.log(level, text)
+
+
+def _ui_counts(ui, state: ResearchState) -> None:
+    """Publish running totals for the run screen.
+
+    The bar answers "how far along"; these answer "how much has it found" —
+    questions answered, findings, and unique sources collected so far.
+    """
+    push = getattr(ui, "set_counts", None)
+    if not callable(push):
+        return
+    _, entries = build_source_registry(state.search_results)
+    push(len(state.answered_questions()), len(state.findings), len(entries))
 
 
 def _record_time(ui, kind: str, started: float) -> float:
@@ -176,9 +189,11 @@ class DeepResearchAgent:
             category_toggles=self.category_toggles
         )
 
-        # Progress budget: decomposition + bounded iterations + cross-ref + report headroom.
-        # Report sections vary (6-10 themes), so headroom is adjusted once known.
-        estimated_steps = 1 + max_iterations + 1 + 12
+        # Progress budget: decomposition + bounded iterations + cross-ref +
+        # theme pass + summary + assembly. The section count is not known until
+        # the theme pass, which raises the total then; a fixed report headroom
+        # made the bar crawl to ~70% and snap to 100% at the end.
+        estimated_steps = 1 + max_iterations + 1 + 3
         if ui is None:
             ui = UIManager(console=self.console)
         short_query = query if len(query) <= 60 else query[:57] + "..."
@@ -222,6 +237,7 @@ class DeepResearchAgent:
             state.reasoning_steps.append(f"Phase 1: Generated {len(sub_questions)} initial research questions")
             completed += 1
             ui.set_progress(completed, "Query decomposed")
+            _ui_counts(ui, state)
 
             if not state.question_queue:
                 raise Exception("Query decomposition produced no research questions; try a more specific query")
@@ -232,20 +248,22 @@ class DeepResearchAgent:
             state.reasoning_steps.append(f"Phase 2: Iterative Research - Started with {len(state.question_queue)} questions")
 
             iteration = 0
-            max_iter = min(max_iterations, len(state.question_queue))
             consecutive_failures = 0
 
             while iteration < max_iterations and state.question_queue:
                 iteration += 1
                 state.iteration_count = iteration
-                _ui_log(ui, "phase", f"Iteration {iteration} of {max_iter}")
+                # The cap is max_iterations, not the queue length it was
+                # captured from: follow-ups enlarge the queue mid-run, and the
+                # old label could read "Iteration 3 of 2".
+                _ui_log(ui, "phase", f"Iteration {iteration} of {max_iterations}")
 
                 # Get next question
                 question = state.get_next_question()
                 if not question:
                     break
 
-                state.reasoning_steps.append(f"\nIteration {iteration}: Processing question {iteration}/{max_iter}")
+                state.reasoning_steps.append(f"\nIteration {iteration}: Processing question {iteration}/{max_iterations}")
                 state.reasoning_steps.append(f"  Question: {question.question}")
 
                 # Determine search depth adaptively. A question is normally
@@ -264,7 +282,7 @@ class DeepResearchAgent:
                 state.reasoning_steps.append(f"  Search depth: {search_depth}")
 
                 # Execute search (network wait happens in a worker thread)
-                ui.set_status(f"Iteration {iteration}/{max_iter} - Searching...")
+                ui.set_status(f"Iteration {iteration}/{max_iterations} - Searching...")
                 _ui_log(
                     ui, "search",
                     f"Searching ({search_depth}): {clip(question.question)}",
@@ -276,7 +294,6 @@ class DeepResearchAgent:
                         state=state,
                         search_depth=search_depth,
                         max_results=per_search,
-                        include_full_content=True,
                         ui_manager=ui,
                     ),
                     kind="search", label=f"search[{iteration}] {clip(question.question, 60)}", ui=ui,
@@ -288,6 +305,7 @@ class DeepResearchAgent:
                     f"{len(search_results)} results in {_seconds(elapsed)}"
                     if search_results else f"no results in {_seconds(elapsed)}",
                 )
+                _ui_counts(ui, state)
 
                 if not search_results:
                     # Mark completion first: it removes the question from the
@@ -310,7 +328,7 @@ class DeepResearchAgent:
                         )
 
                     completed += 1
-                    ui.set_progress(completed, f"Iteration {iteration}/{max_iter} - no results")
+                    ui.set_progress(completed, f"Iteration {iteration}/{max_iterations} - no results")
                     continue
 
                 # Reset consecutive failures counter on successful search
@@ -319,7 +337,7 @@ class DeepResearchAgent:
                 state.reasoning_steps.append(f"  Result: Found {len(search_results)} sources")
 
                 # Analyze results (blocking LLM call off the event loop)
-                ui.set_status(f"Iteration {iteration}/{max_iter} - Analyzing {len(search_results)} sources...")
+                ui.set_status(f"Iteration {iteration}/{max_iterations} - Analyzing {len(search_results)} sources...")
 
                 analysis, elapsed = await _timed(
                     asyncio.to_thread(
@@ -341,10 +359,11 @@ class DeepResearchAgent:
                 )
 
                 state.reasoning_steps.append(f"  Analysis: {confidence:.0%} confidence")
+                _ui_counts(ui, state)
 
                 # Generate follow-up questions if needed
                 if as_bool(analysis.get("needs_more_research")) and iteration < max_iterations - 1:
-                    ui.set_status(f"Iteration {iteration}/{max_iter} - Checking for follow-ups...")
+                    ui.set_status(f"Iteration {iteration}/{max_iterations} - Checking for follow-ups...")
                     follow_ups, elapsed = await _timed(
                         asyncio.to_thread(
                             self.query_analyzer.generate_follow_up_questions,
@@ -366,11 +385,12 @@ class DeepResearchAgent:
                 # Mark question as completed
                 state.mark_question_completed(question.id)
                 completed += 1
-                ui.set_progress(completed, f"Iteration {iteration}/{max_iter} complete")
+                ui.set_progress(completed, f"Iteration {iteration}/{max_iterations} complete")
+                _ui_counts(ui, state)
 
                 # Periodic gap analysis
                 if iteration % 3 == 0:
-                    ui.set_status(f"Iteration {iteration}/{max_iter} - Reviewing knowledge gaps...")
+                    ui.set_status(f"Iteration {iteration}/{max_iterations} - Reviewing knowledge gaps...")
                     gap_items, elapsed = await _timed(
                         asyncio.to_thread(
                             self.query_analyzer.identify_knowledge_gaps, state, ui
@@ -412,6 +432,7 @@ class DeepResearchAgent:
             state.reasoning_steps.append("Phase 3: Completed cross-reference analysis")
             completed += 1
             ui.set_progress(completed, "Cross-reference complete")
+            _ui_counts(ui, state)
 
             # Phase 4: Generate Comprehensive Report
             ui.set_phase("Phase 4: Report Generation")
@@ -422,7 +443,7 @@ class DeepResearchAgent:
             try:
                 final_report, elapsed = await _timed(
                     asyncio.wait_for(
-                        self.report_generator.generate_report(state, ui, completed),
+                        self.report_generator.generate_report(state, ui),
                         timeout=900.0,  # 15 minute timeout for entire report
                     ),
                     kind="llm", label="generate_report", ui=ui,
@@ -444,8 +465,11 @@ class DeepResearchAgent:
                 _ui_log(ui, "err", error_msg)
                 raise
 
-            # Reconcile the progress total with actual steps taken.
-            completed = int(ui.renderer.completed_steps)
+            # Reconcile the progress total with actual steps taken. The
+            # renderer is optional: a frontend that only implements
+            # set_progress should not crash the end of every run.
+            renderer = getattr(ui, "renderer", None)
+            completed = int(getattr(renderer, "completed_steps", 0) or 0)
             ui.set_total(max(completed, 1))
             ui.set_progress(completed, "Report complete")
 
@@ -480,6 +504,12 @@ class DeepResearchAgent:
             summary_table.add_row("Questions answered:", str(len(answered)))
             if failed:
                 summary_table.add_row("Questions failed:", str(len(failed)))
+            not_researched = [
+                question for question in state.questions
+                if question.status in (QuestionStatus.PENDING, QuestionStatus.IN_PROGRESS)
+            ]
+            if not_researched:
+                summary_table.add_row("Not researched:", str(len(not_researched)))
             summary_table.add_row("Searches:", str(state.total_searches))
             summary_table.add_row("Findings:", str(len(state.findings)))
             contradictions = (
@@ -536,7 +566,7 @@ class DeepResearchAgent:
         Returns the number of newly recorded gaps. The same gap often comes
         back from two reviews, so duplicates are dropped by description.
         """
-        existing = {gap.description.strip().lower() for gap in state.gaps}
+        existing = [gap.description for gap in state.gaps]
         added = 0
         for item in gap_items or []:
             if isinstance(item, dict):
@@ -545,7 +575,11 @@ class DeepResearchAgent:
             else:
                 description = str(item or "").strip()
                 severity = "moderate"
-            if not description or description.lower() in existing:
+            # Same point in different words is still one gap: a moderate gap
+            # restating a critical one used to survive and print twice.
+            if not description or any(
+                is_near_duplicate(description, text) for text in existing
+            ):
                 continue
             if severity not in ("critical", "moderate", "minor"):
                 severity = "moderate"
@@ -555,7 +589,7 @@ class DeepResearchAgent:
                 severity=severity,
                 suggested_searches=[],
             ))
-            existing.add(description.lower())
+            existing.append(description)
             added += 1
         return added
 

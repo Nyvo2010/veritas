@@ -3,16 +3,20 @@
 Run with: python -m unittest discover -s tests
 """
 
+import io
 import json
 import os
 import sys
 import threading
 import unittest
 
+from rich.console import Console
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from ui import theme  # noqa: E402
 from ui import color_compat  # noqa: E402
+from ui.live_renderer import LiveRenderer  # noqa: E402
 from ui.timings import Timings  # noqa: E402
 from utils import text  # noqa: E402
 from utils import llm_client  # noqa: E402
@@ -197,6 +201,43 @@ class TextHelperTests(unittest.TestCase):
         }
         for message, expected in cases.items():
             self.assertEqual(text.classify_message(message), expected, message)
+
+
+class LiveRendererLayoutTests(unittest.TestCase):
+    """The Rich CLI run screen must stay exactly as tall as its layout slots.
+
+    A wrapped activity line grows the fixed-height log and pushes the progress
+    bar down on narrow terminals, which is the jitter the renderer exists to
+    avoid.
+    """
+
+    def _render(self, renderable, width=80):
+        buffer = io.StringIO()
+        console = Console(width=width, record=True, file=buffer, force_terminal=False)
+        console.print(renderable)
+        return console.export_text()
+
+    def test_a_long_activity_line_is_clipped_to_the_panel(self):
+        console = Console(width=80, record=True, file=io.StringIO(), force_terminal=False)
+        renderer = LiveRenderer(console=console)
+        renderer.log("ok", "Section ready in 17s: " + "Hardware acceleration " * 20)
+
+        output = self._render(renderer._log_panel())
+
+        for line in output.splitlines():
+            self.assertLessEqual(len(line.rstrip()), 80, line)
+        self.assertIn("…", output)
+
+    def test_a_long_header_is_truncated_instead_of_wrapping(self):
+        console = Console(width=80, record=True, file=io.StringIO(), force_terminal=False)
+        renderer = LiveRenderer(console=console)
+        renderer.title = "Research: " + "quantization quality per flop " * 6
+
+        output = self._render(renderer._header_panel())
+
+        self.assertEqual(len(output.strip("\n").splitlines()), 3, output)
+        for line in output.splitlines():
+            self.assertLessEqual(len(line.rstrip()), 80, line)
 
 
 class TimingsTests(unittest.TestCase):

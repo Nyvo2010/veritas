@@ -346,11 +346,20 @@ def provider_blurb(s=None) -> str:
 # Consistent panels, notices, and page margins
 # --------------------------------------------------------------------------
 
-def panel(title: str, *children) -> Box:
-    """Quiet panel: bold text label, tinted body, no borders."""
+def panel(title: str, *children, title_gap: bool = True) -> Box:
+    """Quiet panel: bold text label, tinted body, no borders.
+
+    Every block gets the same one tinted row above the title and below the
+    last line. A card whose text touches its own edge reads as clipped, and
+    mixing padded and unpadded cards on one screen makes the padding look
+    accidental rather than chosen. ``title_gap`` is for the run screen, where
+    the blocks are dense and vertical space is the scarce resource.
+    """
+    head = [Text(title, bold=True)]
+    if title_gap:
+        head.append(gap())
     return Box(
-        Text(title, bold=True),
-        gap(),
+        *head,
         *children,
         bg=PANEL_BG,
         padding_y=1,
@@ -416,6 +425,7 @@ phase_sig = Signal("Preparing...")
 elapsed_sig = Signal("0s")
 anim_sig = Signal(0)          # monotonic frame counter for the bar's particles
 stats_sig = Signal(())        # ((kind, seconds, calls), ...) for the timing line
+counts_sig = Signal((0, 0, 0))  # (answered, findings, sources) for the run screen
 list_sig = Signal(0)          # bumped whenever a list selection/window changes
 input_sig = Signal(0)         # bumped on every key routed to a text input
 notice_sig = Signal(None)     # None | (kind, text) with kind in NOTICE_STYLE
@@ -672,6 +682,9 @@ def apply_event(ev: tuple) -> None:
     elif kind == "progress":
         _, completed, total, status = ev
         prog_sig.set((float(completed), int(total), status))
+    elif kind == "counts":
+        _, answered, findings, sources = ev
+        counts_sig.set((int(answered), int(findings), int(sources)))
 
 
 def _on_frame(delta_time: float) -> None:
@@ -770,6 +783,7 @@ def start_run() -> None:
     elapsed_sig.set("0s")
     anim_sig.set(0)
     stats_sig.set(())
+    counts_sig.set((0, 0, 0))
     state["result"] = None
     state["run_done"] = False
     state["run_active"] = True
@@ -1018,28 +1032,59 @@ def screen_sources() -> Box:
 
 
 def screen_run() -> Box:
-    """Live run screen: context, the activity log, and the one-row bar.
+    """Live run screen: what is being researched, what it is doing, progress.
 
-    The log block is padded to a fixed number of rows so the screen never
-    grows or shrinks while events stream in.
+    Three blocks instead of one wall of text, so the eye can answer "what am
+    I waiting for?" at a glance: the query and phase sit in the header, the
+    activity log owns the middle, and the bar plus live totals close the
+    screen. Every block has a fixed height, so nothing moves as events stream
+    in (see activity_rows for the row budget).
     """
     return page(
         panel(
             "Research running",
-            Text(f"Query: {short_query(state['query'])}", bold=True),
-            Text(lambda: phase_sig(), fg=accent()),
-            gap(),
+            Text(
+                "Query: " + fit(short_query(state["query"], 96), inner_width() - 7),
+                fg=SECONDARY,
+                bold=True,
+            ),
+            Text(lambda: fit(phase_sig(), inner_width()), fg=accent(), bold=True),
+            title_gap=False,
+        ),
+        gap(),
+        panel(
+            "Activity",
             *log_block(activity_rows()),
+            title_gap=False,
+        ),
+        gap(),
+        panel(
+            "Progress",
+            # The bar is the one element on this screen that is read at a
+            # glance, so it gets a blank row above and below instead of being
+            # packed against the label and the status text.
             gap(),
             Row(
                 Text(lambda: progress_parts()[0], fg=accent()),
                 Text(lambda: progress_parts()[1], fg=TERTIARY),
                 Text(lambda: progress_parts()[2], fg=SECONDARY, bold=True),
             ),
-            Text(lambda: clock_line(), fg=SECONDARY),
+            gap(),
+            # The orchestrator's status ("Iteration 2/3 - Analyzing 9
+            # sources...") is published on every step; it belongs with the
+            # bar, not buried under the query.
+            Text(lambda: status_line(), fg=SECONDARY),
+            # One Text, not a Row: a child that starts with a space is dropped
+            # by this OpenTUI build, which glued "Elapsed 2m" to the counts.
+            # Fit the pair as a unit: two independently fitted lines can still
+            # exceed the interior together and wrap, which moves the block.
+            Text(
+                lambda: fit(clock_line() + "  ·  " + counts_line(), inner_width()),
+                fg=SECONDARY,
+            ),
             Text(lambda: timing_line(), fg=TERTIARY),
+            title_gap=False,
         ),
-        gap(),
         footer=hint("Ctrl+C quits — whatever is finished is saved"),
     )
 
@@ -1738,11 +1783,14 @@ def particles_for(width: int) -> int:
 def activity_rows() -> int:
     """How many activity lines the run screen shows at this terminal height.
 
-    Everything else on the screen is fixed height (two panel paddings, the
-    title, query and phase lines, the one-row bar, its two stat lines, the
-    gaps, and the hint), so the log takes what is left.
+    Fixed chrome: outer margin (1) + header card (padding 1, title, query,
+    phase, padding 1 = 5) + gap (1) + activity card (padding 1, title, log,
+    padding 1 = 3) + gap (1) + progress card (padding 1, title, blank, bar,
+    blank, status, clock, timing, padding 2 = 9) + hint (1) = 21 rows, so the
+    log takes the rest. The run screen drops the blank line under its card
+    labels to pay for the padding.
     """
-    return max(4, term_height() - 14 - MARGIN_TOP)
+    return max(2, term_height() - 21)
 
 
 _bar_frame = {"key": None, "parts": ("", "", "")}
@@ -1773,6 +1821,26 @@ def progress_parts() -> tuple:
     return _bar_frame["parts"]
 
 
+def status_line() -> str:
+    """What the run is doing right now (searching, analyzing, writing)."""
+    _, _, status = prog_sig()
+    return fit(status or "Starting...", inner_width())
+
+
+def counts_line() -> str:
+    """How much has been collected so far: answered, findings, sources."""
+    answered, findings, sources = counts_sig()
+
+    def plural(count: int, word: str) -> str:
+        return f"{count} {word}" if count == 1 else f"{count} {word}s"
+
+    return fit(
+        f"{plural(answered, 'answer')}  ·  {plural(findings, 'finding')}  ·  "
+        f"{plural(sources, 'source')}",
+        inner_width(),
+    )
+
+
 def clock_line() -> str:
     """Elapsed time plus a rough estimate of what is left."""
     line = f"Elapsed {elapsed_sig()}"
@@ -1795,7 +1863,9 @@ def timing_line() -> str:
         for kind, seconds, count in snapshot
     ]
     parts.append(f"{calls} calls")
-    return "  ·  ".join(parts)
+    # Clip like every other run line: a wrapped Text adds a row and the
+    # fixed-height budget below it breaks.
+    return fit("  ·  ".join(parts), inner_width())
 
 
 def activity_line(elapsed: float, level: str, text: str):
@@ -1810,10 +1880,17 @@ def activity_line(elapsed: float, level: str, text: str):
     if level == "phase":
         return Text(f"▎{fit(text, max(8, inner_width() - 1))}", fg=accent(), bold=True)
     clock = theme.format_duration(elapsed)
-    tail = len(clock) + 1                     # right-aligned clock plus one space
-    body = fit(f"{LOG_GLYPH.get(level, '·')} {text}", max(8, inner_width() - tail))
+    # Right-aligned clock with one space before it: the body may only grow to
+    # one cell short of the clock, and is padded up to the clock's column, so a
+    # line truncated at the edge reads "... Tech… 18s", never "Tech…18s".
+    # (The clock has no leading space: a Row child that starts with a space is
+    # dropped by this OpenTUI build, same as the bar's percent.)
+    body = fit(
+        f"{LOG_GLYPH.get(level, '·')} {text}",
+        max(8, inner_width() - len(clock) - 1),
+    )
     return Row(
-        Text(body.ljust(inner_width() - tail), fg=log_color(level)),
+        Text(body.ljust(max(0, inner_width() - len(clock))), fg=log_color(level)),
         Text(clock, fg=TERTIARY),
     )
 
@@ -1821,25 +1898,33 @@ def activity_line(elapsed: float, level: str, text: str):
 def log_block(rows: int) -> list:
     """The tail of the activity log as exactly *rows* lines, headings spaced.
 
-    Newest lines sit at the bottom (just above the progress bar) and a blank
-    line is inserted before every heading, so phases group their own steps.
+    Newest lines sit at the bottom (just above the progress bar). The block is
+    built backwards, so the separator is appended *after* a heading there —
+    reversed, that puts the blank line above the heading and its own steps
+    sit directly under it. A separator that lands on the first line of the
+    window is dropped: it would push the log down one row for no reason.
     """
     out: list = []
     for elapsed, level, text in reversed(log_sig()):
         if level == "phase":
-            if out:
-                out.append(Text(" "))
             out.append(activity_line(elapsed, level, text))
+            if len(out) < rows:
+                out.append(None)      # separator placeholder, reversed below
         else:
             out.append(activity_line(elapsed, level, text))
         if len(out) >= rows:
             break
     out = out[:rows]
     out.reverse()
+    while out and out[0] is None:
+        out.pop(0)
+    out = [Text(" ") if item is None else item for item in out]
     if not out:
         out = [Text("Waiting for activity...", fg=SECONDARY)]
-    # Distinct instances (not a repeated one), each exactly one line tall.
-    return [Text(" ") for _ in range(rows - len(out))] + out
+    # Pad below, not above: an early run used to open with a block of blank
+    # rows and the first event stranded mid-panel. Filler still has to be
+    # present (distinct one-line Text instances) or the card shrinks.
+    return out + [Text(" ") for _ in range(rows - len(out))]
 
 
 # --------------------------------------------------------------------------

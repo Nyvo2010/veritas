@@ -28,7 +28,7 @@ from rich.text import Text
 
 from ui import theme
 from ui.timings import Timings
-from utils.text import strip_markup
+from utils.text import clip, strip_markup
 
 
 @dataclass
@@ -86,12 +86,13 @@ class LiveRenderer:
         self.log_height = log_height
         self._log: Deque[LogEntry] = deque(maxlen=300)
         self.timings = Timings()
+        self.counts = (0, 0, 0)   # (questions answered, findings, sources)
 
         self._layout = Layout()
         self._layout.split_column(
-            Layout(name="header", size=5),
+            Layout(name="header", size=4),
             Layout(name="log", ratio=1),
-            Layout(name="progress", size=7),
+            Layout(name="progress", size=8),
         )
         self._live: Optional[Live] = None
 
@@ -108,6 +109,7 @@ class LiveRenderer:
             self.total_steps = max(1, total_steps)
             self.completed_steps = 0.0
             self.start_time = time.time()
+            self.counts = (0, 0, 0)
             self._render_locked()
             live = Live(
                 self._layout,
@@ -136,6 +138,9 @@ class LiveRenderer:
             self.status = "Complete" if ok else "Failed"
         self.stop()
         elapsed = theme.format_duration(time.time() - self.start_time)
+        # Live.stop() retires the frame but leaves the cursor on its last row;
+        # without this the Done panel is printed flush against the border.
+        self.console.print()
         msg = f"Research {'completed' if ok else 'failed'} in {elapsed}"
         style = theme.SUCCESS if ok else theme.ERROR
         self.console.print(
@@ -181,6 +186,20 @@ class LiveRenderer:
             self.status = status
             self._render_locked()
 
+    def set_counts(self, answered: int, findings: int, sources: int) -> None:
+        """Running totals for the progress panel (questions, findings, sources)."""
+        with self._lock:
+            self.counts = (int(answered), int(findings), int(sources))
+            self._render_locked()
+
+    def _inner_width(self) -> int:
+        """Columns inside a panel: borders and the (0, 2) padding removed."""
+        try:
+            width = self.console.width or 80
+        except Exception:
+            width = 80
+        return max(20, width - 6)
+
     # -- log API (only path for output during a run) -------------------
 
     def log(self, level: str, text: str) -> None:
@@ -215,6 +234,8 @@ class LiveRenderer:
         text.append("VERITAS", style=f"bold {theme.PRIMARY}")
         text.append(f"  ·  {self.title}", style=theme.SECONDARY)
         text.append(f"  ·  {self.phase}", style=theme.MUTED)
+        # A long query used to wrap the header and break its border.
+        text.truncate(self._inner_width(), overflow="ellipsis")
         return Panel(
             text,
             box=theme.PANEL_BOX,
@@ -234,7 +255,12 @@ class LiveRenderer:
             text.append(f"{elapsed:>7} ", style=theme.MUTED)
             text.append(f"{glyph} ", style=style)
             # Keep markup from old call sites inert: render as plain text.
-            text.append(strip_markup(entry.text), style=theme.SECONDARY)
+            # Clip to the panel interior: a wrapped line makes the fixed-height
+            # log taller than its layout slot and pushes the bar down mid-run.
+            text.append(
+                clip(strip_markup(entry.text), self._inner_width() - 10),
+                style=theme.SECONDARY,
+            )
             text.append("\n")
         # Drop the final newline so the panel height stays constant.
         plain = text.plain
@@ -277,8 +303,15 @@ class LiveRenderer:
         if timing:
             text.append("\n")
             text.append(timing, style=theme.MUTED)
+        answered, findings, sources = self.counts
+        if answered or findings or sources:
+            text.append("\n")
+            text.append(
+                f"{answered} answered · {findings} findings · {sources} sources",
+                style=theme.MUTED,
+            )
         text.append("\n")
-        text.append(self.status, style=theme.MUTED)
+        text.append(clip(self.status, self._inner_width()), style=theme.MUTED)
         return Panel(
             text,
             title="Progress",

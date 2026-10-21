@@ -654,6 +654,59 @@ class LLMClient:
             f"Failed to get valid JSON after {max_parse_retries} attempts: {last_error}"
         )
 
+    def check_citation_support(self, claims: List[Dict], evidence: List[Dict]) -> List[str]:
+        """Which citation markers the cited excerpt does not support.
+
+        One call per section, over claims that already carry a marker. The
+        answer is a list of claim ids (M1, M2...); the caller removes exactly
+        those markers and never rewrites the prose. Raises on failure so the
+        caller can fail open and keep the citations.
+        """
+        if not claims or not evidence:
+            return []
+
+        claims_text = "\n".join(
+            f"{claim['id']} | Source {claim['source']} | {claim['sentence']}"
+            for claim in claims
+        )
+        evidence_text = "\n\n".join(
+            f"[Source {item.get('number')}] {item.get('title', '')}\n"
+            f"{clip(str(item.get('content', '')), 700)}"
+            for item in evidence
+        )
+
+        system_prompt = (
+            "You verify citations in one section of a research report.\n\n"
+            "For each claim, decide whether the cited source excerpt states or "
+            "directly supports it. A shared topic is not support, and a "
+            "plausible claim is not support: judge only the excerpt.\n\n"
+            "List a claim only when the excerpt clearly does not support it. "
+            "If the excerpt is short, truncated, ambiguous, or covers only part "
+            "of the claim, keep the citation. Never invent an id.\n\n"
+            'Return only JSON: {"unsupported": ["M2", "M5"]}'
+        )
+        user_prompt = (
+            f"CLAIMS:\n{claims_text}\n\n"
+            f"EVIDENCE THE SECTION WAS GIVEN:\n{evidence_text}"
+        )
+
+        parsed = self.chat_json(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=600,
+        )
+        unsupported = parsed.get("unsupported") if isinstance(parsed, dict) else None
+        if not isinstance(unsupported, list):
+            return []
+        return [
+            str(item.get("id", "") if isinstance(item, dict) else item)
+            for item in unsupported
+            if str(item.get("id", "") if isinstance(item, dict) else item).strip()
+        ]
+
     def decompose_query(self, main_query: str) -> Dict:
         """Decompose a main query into prioritised sub-questions.
 
@@ -745,6 +798,9 @@ Consider:
 - How confident are you in the answer TO THIS SPECIFIC QUESTION?
 - Weight high-quality sources over thin, promotional, or user-generated pages.
   If only low-quality sources support a claim, say so and lower the confidence.
+- A video, forum post, or vendor marketing page is a claim to check, not proof.
+  Never use one of those as the basis for a number or a comparison; if it is
+  all the results offer, name the kind of source and lower the confidence.
 
 SPLIT THE ANSWER INTO FINDINGS
 An answer usually contains several distinct points, and each one is written up
@@ -765,7 +821,6 @@ Return JSON:
     "analysis": "Your critical analysis OF THE QUESTION ASKED",
     "answer": "Best answer based on available info FOR THIS SPECIFIC QUESTION",
     "confidence": 0.0-1.0,
-    "source_agreement": "high/medium/low",
     "source_indices": [1, 3],
     "findings": [
         {
@@ -792,6 +847,7 @@ you did not use."""
         results_text = "\n\n".join([
             f"Source {i+1}: {r.get('title', 'No title')}\n"
             f"URL: {r.get('url', 'No URL')}\n"
+            f"Type: {r.get('source_type', 'web')} · "
             f"Category: {r.get('category', 'general')} · "
             f"evidence quality: {float(r.get('quality', 0.0)):.2f}"
             + (f" · published: {r['published_date']}" if r.get('published_date') else "")
@@ -952,17 +1008,39 @@ PREFER: Specific mechanisms, dynamics, patterns, trade-offs, or insights"""
                 + "\n- ".join(str(title) for title in other_sections[:12])
             )
 
+        # A section built from one page cannot support 1,400 words without
+        # padding. Asking for a shorter section when the evidence is thin is
+        # the honest request; the old fixed target produced paragraphs of
+        # uncited mechanism prose around a single citation.
+        excerpt_count = len([
+            source for source in (evidence_sources or []) if source.get("number")
+        ])
+        if excerpt_count <= 1:
+            word_low, word_high = 350, 600
+            evidence_note = (
+                "\nOnly one source is available for this section. Write a short "
+                "section, attribute claims to that source, and state the gap; do "
+                "not pad it with general knowledge."
+            )
+        else:
+            word_low, word_high = 700, 1100
+            evidence_note = ""
+
         system_prompt = f"""You are an expert analyst writing one section of a research report.
 
 Scope: this section speaks only to the main research query — "{main_query}".
 Target style: {style}. Stay on topic, do not drift to tangentially related
 subjects, and base every claim on the evidence provided.{covered}
 
-Write 900-1400 words of original analysis that:
+Write {word_low}-{word_high} words of original analysis that:
 - examines the specific mechanisms, dynamics, or patterns behind this theme
 - uses concrete examples, figures, and evidence rather than generalities
 - includes counterarguments, nuances, and limitations where they exist
 - avoids material that other sections would already cover
+
+If the evidence supports less than the range, stop at what it supports rather
+than padding. A shorter, grounded section is better than a padded one.
+{evidence_note}
 
 {REPORT_STYLE_GUIDE}
 
@@ -1003,8 +1081,9 @@ Return only the section body; its heading is added automatically."""
                 "belongs only on the sentence that excerpt supports):\n"
                 + "\n\n".join(
                     f"[Source {int(source['number'])}] "
-                    f"{source.get('title', '')} — "
-                    f"{(source.get('content') or '')[:900]}"
+                    f"{source.get('title', '')}"
+                    + (f" ({source['type']})" if source.get("type") else "")
+                    + f" — {(source.get('content') or '')[:900]}"
                     for source in excerpt_sources
                 )
             )
@@ -1017,7 +1096,7 @@ Unique Angle: {theme_description}
 Findings (synthesis of the searches):
 {findings_text}{evidence_text}
 
-Write this section (900-1400 words), exploring the theme in depth:
+Write this section ({word_low}-{word_high} words), exploring the theme in depth:
 
 STRUCTURE:
 1. Open with the most important insight or finding (no generic intro)
@@ -1040,6 +1119,11 @@ section: one source repeated down a whole argument claims more agreement than
 the evidence has. A citation is not decoration: attach it to the sentence it
 supports. If the source evidence and the findings disagree, say so rather than
 averaging them.
+
+SOURCE TYPE: a video, forum post, or vendor page is a claim to check, not
+proof. If a figure or conclusion rests only on one of those, attribute it to
+the source by name ("a manufacturer's page states...") or leave it out; never
+present it as established fact.
 
 GROUNDING: every subsection needs at least one sentence carrying a citation.
 A claim that no supplied source supports should be removed, not written
@@ -1075,11 +1159,12 @@ and is not."""
         main_query: str,
         key_findings: List[str],
         source_numbers: List[int] = None,
+        target_words: int = 600,
     ) -> str:
         """Executive summary with the primary model, falling back once on failure."""
         return self._with_fallback(
             self._generate_executive_summary, main_query,
-            key_findings, source_numbers,
+            key_findings, source_numbers, target_words,
         )
 
     def _generate_executive_summary(
@@ -1087,6 +1172,7 @@ and is not."""
         main_query: str,
         key_findings: List[str],
         source_numbers: List[int] = None,
+        target_words: int = 600,
     ) -> str:
         """Generate executive summary after all sections are complete."""
         numbers = [int(number) for number in (source_numbers or [])]
@@ -1103,15 +1189,33 @@ and is not."""
         else:
             citation_rule = "Omit [Source N] markers: no source was cited by the sections."
 
+        # A fixed 600-900 word request made the summary as long as a section
+        # when the report was short, so it restated the body. The caller sizes
+        # this against the body it actually has, and 450 is the ceiling: a
+        # summary longer than the shortest section is a second body.
+        try:
+            target = max(200, min(450, int(target_words)))
+        except (TypeError, ValueError):
+            target = 400
+        low, high = max(200, target - 80), min(520, target + 100)
+
         system_prompt = f"""You are an expert analyst writing the executive summary of a research report.
 
-Write 600-900 words that:
+Write {low}-{high} words that:
 - state the research question and why it matters
-- surface the 5-7 most important findings, each with concrete detail
+- surface the most important findings, each with concrete detail
 - draw out the patterns and tensions across the findings
 - note the practical implications and the important limitations or uncertainties
 
+Do not walk through every section: state the conclusions a reader needs, and
+leave the supporting detail in the body. Repeating the sections in shorter
+form is not a summary.
+
         {REPORT_STYLE_GUIDE}
+
+        For this part only, override the subheading rule above: the executive
+        summary is one continuous piece of prose. Do not use "###" headings,
+        bullet lists, or bold text.
 
         {citation_rule}
 
@@ -1128,8 +1232,9 @@ Write 600-900 words that:
 Key Findings:
 {findings_text}
 
-Write the executive summary (600-900 words) capturing the most important
-insights. Be specific and actionable; avoid generic statements."""
+Write the executive summary ({low}-{high} words) capturing the most important
+insights. Be specific and actionable; avoid generic statements. Rewrite the
+findings in your own words: do not copy their sentences."""
 
         messages = [
             {"role": "system", "content": system_prompt},

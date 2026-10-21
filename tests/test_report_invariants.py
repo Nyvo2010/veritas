@@ -31,6 +31,8 @@ class _UI:
     def __init__(self):
         self.renderer = type("Renderer", (), {"completed_steps": 0})()
         self.timings = None
+        self.total = 1
+        self.overflowed = False
 
     def initialize(self, total, title):
         self.total = total
@@ -51,6 +53,10 @@ class _UI:
         self.status = status
 
     def set_progress(self, completed, label):
+        # A completed step past the total is how the bar used to run off the
+        # end of a guessed budget; record it instead of hiding it in a clamp.
+        if completed > self.total:
+            self.overflowed = True
         self.renderer.completed_steps = completed
 
     def set_total(self, total):
@@ -135,7 +141,8 @@ class _StubLLM:
 
         return run()
 
-    def generate_executive_summary(self, main_query, key_findings, source_numbers=None):
+    def generate_executive_summary(self, main_query, key_findings, source_numbers=None,
+                                   target_words=600):
         numbers = sorted(int(number) for number in (source_numbers or []))
         marker = f" [Source {numbers[0]}]" if numbers else ""
         return f"The research answers the question{marker}. An invented marker [Source 99]."
@@ -187,7 +194,7 @@ def _body(report):
 
 def _bibliography(report):
     tail = report.split("\n## Sources\n", 1)[-1]
-    return [int(number) for number in re.findall(r"^\d+\. \[Source (\d+)\]", tail, re.M)]
+    return [int(number) for number in re.findall(r"^\[Source (\d+)\]", tail, re.M)]
 
 
 def _markers(text):
@@ -196,14 +203,24 @@ def _markers(text):
 
 class ReportInvariantTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.ui = _UI()
         self.state = await _agent().research(
-            "quantization", max_iterations=2, verbose=False, ui=_UI()
+            "quantization", max_iterations=2, verbose=False, ui=self.ui
         )
         self.report = self.state.final_report
 
     def test_the_run_reached_the_report_stage(self):
         self.assertTrue(self.report, "the stub run produced no report")
         self.assertEqual(self.state.iteration_count, 2)
+
+    def test_no_step_ever_runs_past_the_progress_total(self):
+        # The report raises the total once the real section count is known;
+        # before that fix every section after the guessed headroom overflowed.
+        self.assertFalse(
+            self.ui.overflowed,
+            "a step exceeded the progress total (the bar would be clamped)",
+        )
+        self.assertGreaterEqual(self.ui.renderer.completed_steps, self.ui.total)
 
     def test_every_citation_resolves_and_the_bibliography_is_contiguous(self):
         numbers = _bibliography(self.report)
@@ -235,8 +252,10 @@ class ReportInvariantTests(unittest.IsolatedAsyncioTestCase):
     def test_one_section_per_finding_and_each_section_is_cited(self):
         body_headings = [
             heading for heading in _headings(self.report)
-            if heading not in {"Executive Summary", "Uncertainties and Knowledge Gaps",
-                               "Sources"}
+            if heading not in {
+                "Executive Summary", "Uncertainties and Knowledge Gaps",
+                "Consensus and Contradictions", "Sources",
+            }
         ]
         self.assertEqual(len(body_headings), len(self.state.findings))
         for section in self.state.report_sections:

@@ -14,6 +14,26 @@ from ui.live_renderer import LiveRenderer
 from utils.text import classify_message
 
 
+def notify(ui, level: str, text: str) -> None:
+    """Write one leveled line to any UI sink, old or new.
+
+    The agents used to call ``add_message`` directly, which made the UI
+    contract implicit: a sink without the legacy method crashed mid-run even
+    though it implemented the current ``log(level, text)`` API. Prefer the
+    leveled method, fall back to the legacy one, and do nothing when there is
+    no sink.
+    """
+    if ui is None or not text:
+        return
+    log_method = getattr(ui, "log", None)
+    if callable(log_method):
+        log_method(level, text)
+        return
+    add_message = getattr(ui, "add_message", None)
+    if callable(add_message):
+        add_message(text, style="yellow" if level == "warn" else "white")
+
+
 class UIManager:
     def __init__(self, console: Optional[Console] = None):
         self.console = console or Console()
@@ -39,6 +59,10 @@ class UIManager:
     def log(self, level: str, text: str) -> None:
         """Write one leveled line (same vocabulary as the OpenTUI sink)."""
         self._renderer.log(level, text)
+
+    def set_counts(self, answered: int, findings: int, sources: int) -> None:
+        """Running totals for the progress panel."""
+        self._renderer.set_counts(answered, findings, sources)
 
     # -- legacy API (kept for agents/main.py) --------------------------
     def initialize(self, total_steps: int, description: str = "Research Progress") -> None:
