@@ -21,15 +21,24 @@ from utils.tavily_client import TavilySearchClient
 from utils.llm_client import LLMClient
 from utils.sources import (
     canonical_url,
+    clean_page_text,
     duplicate_of,
     merge_result,
     prepare_results,
     select_for_analysis,
 )
 from utils.text import clip
+from utils.ui_manager import notify
 from config import MAX_ANALYSIS_RESULTS, MAX_RESULTS_PER_DOMAIN, MAX_SEARCH_RESULTS
 
 log = logging.getLogger("veritas.search")
+
+# A search whose best result is this weakly related did not answer the query;
+# the engine filled the list with loose word matches. Analysing them produces
+# a confident-looking section built on the wrong subject, so the search is
+# treated as empty instead. Genuine matches score far higher (0.7-0.95); the
+# one run that motivated this had a best score of 0.24 and six film pages.
+MIN_USEFUL_RELEVANCE = 0.30
 
 
 class SearchAgent:
@@ -47,7 +56,6 @@ class SearchAgent:
         state: ResearchState,
         search_depth: str = "basic",
         max_results: int = MAX_SEARCH_RESULTS,
-        include_full_content: bool = False,
         ui_manager=None
     ) -> List[SearchResult]:
         """
@@ -58,7 +66,6 @@ class SearchAgent:
             state: Current research state
             search_depth: "basic" or "advanced"
             max_results: Maximum results to return
-            include_full_content: Whether to fetch full webpage content
             ui_manager: Optional UI manager for progress updates
         
         Returns:
@@ -86,7 +93,10 @@ class SearchAgent:
                     search_depth=search_depth,
                     max_results=max_results,
                     include_raw_content=True,
-                    include_answer=True,
+                    # The provider's generated answer was requested and then
+                    # never read (only its "results" are used), so it is no
+                    # longer paid for.
+                    include_answer=False,
                     topic=topic,
                     time_range=time_range,
                     category_toggles=state.category_toggles,
@@ -102,10 +112,13 @@ class SearchAgent:
                     url=result_data.get("url"),
                     title=result_data.get("title") or "",
                     # A null field from the API must not reach slicing in the
-                    # analysis prompt.
-                    content=result_data.get("content") or "",
+                    # analysis prompt. Fetched pages are markdown/HTML soup;
+                    # stripping images, link URLs and nav boilerplate here
+                    # means every later prompt spends its character budget on
+                    # text that could actually support a claim.
+                    content=clean_page_text(result_data.get("content") or ""),
                     score=result_data.get("score", 0.0),
-                    full_content=result_data.get("raw_content"),
+                    full_content=clean_page_text(result_data.get("raw_content") or ""),
                     category=result_data.get("category", "general"),
                     question_id=question.id,
                     published_date=(
@@ -125,6 +138,23 @@ class SearchAgent:
                     len(rejected), len(candidates),
                     ", ".join(f"{reason} x{count}" for reason, count in reasons.items()),
                 )
+
+            if usable and max(float(result.score or 0.0) for result in usable) < MIN_USEFUL_RELEVANCE:
+                best = max(float(result.score or 0.0) for result in usable)
+                log.warning(
+                    "search results for %r look unrelated (best relevance %.2f); treating as empty",
+                    search_query, best,
+                )
+                state.reasoning_steps.append(
+                    f"[SEARCH WARNING] results did not match the question "
+                    f"(best relevance {best:.2f})"
+                )
+                if ui_manager:
+                    notify(
+                        ui_manager, "warn",
+                        f"Results look unrelated (best match {best:.0%}) - skipping",
+                    )
+                return []
 
             by_url = {
                 canonical_url(existing.url): existing
@@ -164,9 +194,9 @@ class SearchAgent:
             error_msg = f"Search failed for '{search_query[:50]}...': {str(e)}"
             log.warning("search failed for %r: %s", search_query, e, exc_info=True)
             if ui_manager:
-                ui_manager.add_message(
+                notify(
+                    ui_manager, "warn",
                     f"Search error: {clip(str(e))} (timeout, rate limit, or network)",
-                    style="yellow",
                 )
             state.reasoning_steps.append(f"[SEARCH ERROR] {error_msg}")
 

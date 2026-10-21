@@ -72,8 +72,15 @@ def configure(force: bool = False) -> str:
         console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
         root.addHandler(console)
 
-    # These libraries are chatty at DEBUG and drown out our own lines.
-    for noisy in ("httpx", "httpcore", "openai", "urllib3", "requests", "hpack"):
+    # These libraries are chatty at DEBUG and drown our own lines out. The
+    # HTTP stack is the worst offender: one request emits a dozen frames and
+    # dumps the response headers (cookies included) into the log. Both the
+    # old httpcore and the httpcore2 used by newer openai releases are listed,
+    # because a missing name here is 150 lines of transport noise per run.
+    for noisy in (
+        "httpx", "httpx2", "httpcore", "httpcore2", "http11", "h11", "hpack",
+        "openai", "urllib3", "requests", "anyio", "truststore",
+    ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     _CONFIGURED = True

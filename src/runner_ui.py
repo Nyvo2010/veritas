@@ -11,6 +11,7 @@ Kinds emitted:
   ("status", text)
   ("phase", text)
   ("progress", completed, total, status)
+  ("counts", answered, findings, sources)
   ("done", ok)
 
 Timing is not an event: the orchestrator calls add_timing() directly and the
@@ -38,6 +39,7 @@ class QueueUI:
         self.completed_steps = 0.0
         self.start_time = time.time()
         self.done_ok = None
+        self.counts = (0, 0, 0)     # (questions answered, findings, sources)
         self.timings = Timings()
 
     @property
@@ -54,6 +56,7 @@ class QueueUI:
             self.completed_steps = 0.0
             self.start_time = time.time()
             self.done_ok = None
+            self.counts = (0, 0, 0)
 
     def start(self) -> None:
         pass
@@ -69,8 +72,20 @@ class QueueUI:
 
     # -- progress --------------------------------------------------------
     def set_total(self, total: int) -> None:
+        # Publish the new total with the current position: the frame callback
+        # only redraws on events, so a silent total change would leave the bar
+        # scaled against the old estimate until the next step finished.
         with self._lock:
             self.total_steps = max(1, int(total))
+            snapshot = (self.completed_steps, self.total_steps, self.status)
+        self.events.put(("progress",) + snapshot)
+
+    def set_counts(self, answered: int, findings: int, sources: int) -> None:
+        """Running totals for the run screen; cheap and idempotent."""
+        counts = (int(answered), int(findings), int(sources))
+        with self._lock:
+            self.counts = counts
+        self.events.put(("counts",) + counts)
 
     def set_progress(self, completed: float, status: str = "") -> None:
         with self._lock:

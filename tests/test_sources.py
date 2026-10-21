@@ -18,11 +18,13 @@ from utils.sources import (  # noqa: E402
     build_source_registry,
     canonical_url,
     citation_count,
+    clean_page_text,
     normalize_citations,
     number_for,
     prepare_results,
     quality_score,
     select_for_analysis,
+    source_type,
 )
 
 
@@ -79,6 +81,17 @@ class PrepareResultsTests(unittest.TestCase):
         kept, rejected = prepare_results(results)
         self.assertEqual([r.url for r in kept], ["https://example.com/real"])
         self.assertEqual(len(rejected), 2)
+
+    def test_a_result_below_the_relevance_floor_is_rejected(self):
+        kept, rejected = prepare_results(
+            [result("https://example.com/movie", score=0.05)]
+        )
+        self.assertEqual(kept, [])
+        self.assertEqual(len(rejected), 1)
+
+    def test_a_missing_score_is_not_read_as_irrelevant(self):
+        kept, _ = prepare_results([result("https://example.com/page", score=0.0)])
+        self.assertEqual(len(kept), 1)
 
     def test_a_long_blocked_page_is_rejected(self):
         blocked = result(
@@ -181,6 +194,73 @@ class PrepareResultsTests(unittest.TestCase):
         educational = result("https://example.com/paper", category="educational")
         social = result("https://example.com/post", category="social")
         self.assertGreater(quality_score(educational), quality_score(social))
+
+
+class SourceTypeTests(unittest.TestCase):
+    def test_page_kinds_are_distinguished(self):
+        cases = {
+            "https://www.youtube.com/watch?v=abc": "video",
+            "https://www.facebook.com/page/videos/123": "video",
+            "https://www.reddit.com/r/WaterTreatment/comments/1": "forum",
+            "https://pmc.ncbi.nlm.nih.gov/articles/PMC10054062": "academic",
+            "https://www.mdpi.com/2305-6304/13/9/782": "academic",
+            "https://www.cdc.gov/water/index.html": "institution",
+            "https://news.osu.edu/some-bottled-water-worse-than-tap": "news",
+            "https://med.stanford.edu/news/insights/2025/01/x.html": "institution",
+            "https://en.wikipedia.org/wiki/Microplastic": "reference",
+            "https://docs.python.org/3/library/re.html": "docs",
+            "https://www.bbc.com/news/science": "news",
+            "https://vendor.example/blog/post": "web",
+            # Venue hosts, not just publisher hosts: an ACL Anthology PDF is a
+            # peer-reviewed paper and must not rank with the web prior.
+            "https://aclanthology.org/2025.naacl-long.267.pdf": "academic",
+            "https://openreview.net/forum?id=abc": "academic",
+        }
+        for url, expected in cases.items():
+            with self.subTest(url=url):
+                self.assertEqual(source_type(url), expected)
+
+    def test_a_video_scores_below_a_paper_at_equal_relevance(self):
+        video = result(
+            "https://www.youtube.com/watch?v=abc", score=0.9,
+            title="A long and confident video title",
+        )
+        paper = result(
+            "https://www.nature.com/articles/abc", score=0.9,
+            title="A long and confident paper title",
+        )
+        self.assertGreater(quality_score(paper), quality_score(video))
+        self.assertLess(quality_score(video), 0.7)
+
+    def test_registry_entry_records_the_page_kind(self):
+        _, entries = build_source_registry([
+            result("https://www.youtube.com/watch?v=abc")
+        ])
+        self.assertEqual(entries[0].source_type, "video")
+
+
+class CleanPageTextTests(unittest.TestCase):
+    def test_images_and_link_urls_are_removed_but_labels_kept(self):
+        raw = (
+            '![logo](/img/s.png) [Read more](https://x.example/a) '
+            '<div>Body text about filters</div>'
+        )
+        cleaned = clean_page_text(raw)
+        self.assertNotIn("s.png", cleaned)
+        self.assertNotIn("https://x.example/a", cleaned)
+        self.assertIn("Read more", cleaned)
+        self.assertIn("Body text about filters", cleaned)
+
+    def test_navigation_boilerplate_is_dropped(self):
+        raw = "Skip to content\nMenu\nReal evidence about filters.\nAccept all cookies"
+        self.assertEqual(clean_page_text(raw), "Real evidence about filters.")
+
+    def test_paragraph_structure_is_kept(self):
+        raw = "First paragraph.\n\n\n\nSecond paragraph."
+        self.assertEqual(clean_page_text(raw), "First paragraph.\n\nSecond paragraph.")
+
+    def test_empty_input_is_empty_output(self):
+        self.assertEqual(clean_page_text(None), "")
 
 
 class AnalysisSelectionTests(unittest.TestCase):

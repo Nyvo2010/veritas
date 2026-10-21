@@ -2,6 +2,103 @@
 
 Notable changes per release. This project follows [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- The citation support check runs on a worker thread. It is a blocking model
+  call, and running it on the event loop held up every other section that was
+  still waiting for its reply: a three-iteration run spent 19s in report
+  generation where the same work took 53s.
+- The report header states what that check examined — `Source check: 28 of 48
+  section citations verified`. It is left out when any section could not be
+  audited, so a partial audit is never summed up as a whole one, and a reply
+  that is not a verdict counts as a failure rather than as "nothing rejected".
+- The ACL Anthology, ACL, OpenReview, JMLR, NeurIPS, ICLR, AAAI and IJCAI
+  hosts are classified as academic. A peer-reviewed ACL paper used to print as
+  "Web page" and rank with the web prior.
+- The run screen's three cards share one padding rule: a blank row above the
+  title and below the last line, so no text touches the tinted edge. The
+  progress bar gets a blank row of its own above and below, the blank line
+  that separates phase groups now sits above a heading instead of below it,
+  and the activity log no longer opens on a stray blank row.
+- A search whose best result is only weakly related to the question is now
+  treated as empty, and individual results below the relevance floor are
+  dropped before analysis. One run returned six pages about the 1995 film
+  *Heat* for a question about heat pumps, and the report was written from
+  them; the failure is now reported and the question stays unanswered.
+- Sources are classified by kind (academic, institution, news, reference,
+  docs, video, forum, web) and the evidence score is multiplied by that prior.
+  The bibliography shows the kind instead of `General`; the internal quality
+  and relevance numbers stay in the run log. A YouTube clip and a paper no
+  longer both read as 0.93.
+- Fetched page text is cleaned before it reaches a prompt: image markup, link
+  URLs, HTML tags and one-line cookie/navigation boilerplate are stripped, so
+  the analysis budget is spent on evidence instead of page chrome.
+- The report header states question coverage (`3 answered of 5`), and planned
+  questions that failed or were never reached are listed under **Not
+  answered** instead of being silently absent.
+- Consensus and contradictions are their own section instead of the tail of
+  "Uncertainties and Knowledge Gaps"; gaps and contradictions that restate
+  each other are printed once.
+- The executive summary is sized against the body instead of always asking
+  for 600-900 words, capped at 450 words, and told to stay one piece of prose
+  rather than a set of `###` subsections. A section built on thin evidence is
+  asked for a shorter length rather than being padded to 1,400 words.
+- Section headings are sentence-cased, so a theme pass that returns a raw
+  question no longer prints a lowercase heading; acronyms and proper nouns
+  keep their own casing. A trailing full stop is dropped.
+- A section prefers pages no earlier section was given and only reuses shared
+  pages until it has four excerpts, so two sections built on one question stop
+  writing the same paragraph.
+- A run that produced no findings writes a short honest report instead of
+  asking the model to summarise nothing.
+- A section's citations are checked against the excerpts it was given. A
+  claim whose cited page does not support it loses the marker (never the
+  sentence), the check fails open if the judge is unavailable, and only
+  sentences that already cite something are sent. One measured run dropped 23
+  unsupported markers and exposed a paragraph of vendor benchmark scores that
+  had been citing a blog.
+- Evidence excerpts are chosen from the most relevant passage of a page
+  instead of its first 900 characters. Pages that open with navigation or a
+  generic definition no longer make two sections quote the same line; a page
+  with no relevant passage keeps its head.
+- The cross-reference section shows the model's own confidence rating and the
+  gaps list includes minor gaps, both of which the run paid for and then
+  dropped. The unused `source_agreement` field is no longer requested.
+- The run log no longer records HTTP transport frames and response headers
+  (`httpcore2`/`httpx2`), which were most of a run's log lines. The
+  three-citations-per-source cap is now enforced: markers past the cap are
+  dropped and counted in the log, instead of only being reported.
+- A section body that opens with an H3 repeating its own heading no longer
+  prints the title twice.
+- Tavily's generated answer is no longer requested (it was never read), and
+  the ignored `include_full_content` and `base_step` plumbing is gone.
+- The run summary lists questions that were not researched, alongside
+  answered and failed ones.
+
+- Findings survive an analysis reply that leaves `answer` empty. Extraction
+  used to sit inside `if answer:`, so a model that returned a populated
+  `findings` array and no summary sentence lost every point in it.
+- The progress total now tracks the work actually queued. It was the iteration
+  count plus a fixed 12-step report allowance, so a six-section report crawled
+  to ~70% and then snapped to 100%. The theme pass raises the total once the
+  section count is known, and the end-of-run reconciliation no longer papers
+  over the gap.
+- The run screen shows what the run is doing and how much it has found. The
+  orchestrator had been publishing "Iteration 2/3 - Analyzing 9 sources..." on
+  every step and the TUI never drew it; that line and a live `answers ·
+  findings · sources` row now sit under the phase. The Rich CLI's progress
+  panel carries the same counters.
+- The Rich CLI run screen keeps its fixed height on narrow terminals: activity
+  lines and the header are clipped to the panel instead of wrapping into the
+  progress bar, and the Done panel is no longer printed flush against the
+  retired frame.
+- The run log reports body citations only. `citation_count` matched the
+  `[Source N]` entries in the bibliography as well, so a 90-citation report was
+  logged as 99.
+- `Iteration N of M` no longer reads "3 of 2": follow-ups enlarge the queue
+  mid-run, and the label was captured from its initial length while the loop
+  was capped by `max_iterations`.
+
 ## [1.0.4] - 2026-10-21
 
 - One analysis pass can now produce several findings, one per distinct point

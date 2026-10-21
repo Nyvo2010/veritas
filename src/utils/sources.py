@@ -74,6 +74,176 @@ _CATEGORY_QUALITY = {
     "social": 0.65,
 }
 
+# What kind of page this is. A video, forum post, or vendor blog can be the
+# only thing a search returns, but it is not the same evidence as a paper or a
+# statistics agency, and the score should not pretend otherwise. The prior is
+# a multiplier on the blended score, so a long marketing page cannot outrank a
+# paper just by being long.
+_SOURCE_TYPE_PRIOR = {
+    "academic": 1.0,
+    "institution": 0.95,
+    "reference": 0.90,
+    "news": 0.88,
+    "docs": 0.85,
+    "web": 0.80,
+    "forum": 0.55,
+    "video": 0.50,
+}
+
+_SOURCE_TYPE_LABEL = {
+    "academic": "Academic paper",
+    "institution": "Institution",
+    "reference": "Reference work",
+    "news": "News",
+    "docs": "Documentation",
+    "web": "Web page",
+    "forum": "Forum post",
+    "video": "Video",
+}
+
+_ACADEMIC_HOSTS = (
+    "arxiv.org", "biorxiv.org", "medrxiv.org", "ssrn.com", "doi.org",
+    "pubmed.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov", "pmc.ncbi.nlm.nih.gov",
+    "nature.com", "science.org", "sciencedirect.com", "springer.com",
+    "link.springer.com", "ieee.org", "acm.org", "jstor.org", "mdpi.com",
+    "plos.org", "frontiersin.org", "cell.com", "elifesciences.org",
+    "tandfonline.com", "sagepub.com", "wiley.com", "onlinelibrary.wiley.com",
+    "researchgate.net", "scholar.google.com", "semanticscholar.org",
+    # The venues themselves, not just their publishers: an ACL Anthology PDF
+    # used to print as "Web page" and rank with the web prior.
+    "aclanthology.org", "aclweb.org", "openreview.net", "jmlr.org",
+    "proceedings.mlr.press", "neurips.cc", "papers.nips.cc", "iclr.cc",
+    "aaai.org", "ijcai.org",
+)
+_INSTITUTION_HOSTS = (
+    "who.int", "un.org", "worldbank.org", "imf.org", "iea.org", "oecd.org",
+    "europa.eu", "ec.europa.eu", "cdc.gov", "nih.gov", "nsf.gov",
+)
+_NEWS_HOSTS = (
+    "bbc.com", "bbc.co.uk", "cnn.com", "nytimes.com", "theguardian.com",
+    "reuters.com", "apnews.com", "bloomberg.com", "wsj.com", "ft.com",
+    "economist.com", "npr.org", "aljazeera.com", "cnbc.com", "axios.com",
+    "arstechnica.com", "theverge.com", "techcrunch.com", "wired.com",
+)
+_REFERENCE_HOSTS = ("wikipedia.org", "wikidata.org", "britannica.com")
+_DOCS_HOSTS = (
+    "readthedocs.io", "developer.mozilla.org", "docs.python.org",
+    "github.com", "gitlab.com",
+)
+_VIDEO_HOSTS = ("youtube.com", "youtu.be", "vimeo.com", "tiktok.com")
+_FORUM_HOSTS = (
+    "reddit.com", "quora.com", "stackoverflow.com", "stackexchange.com",
+    "news.ycombinator.com", "x.com", "twitter.com", "discourse.org",
+)
+
+
+def _host_matches(host: str, domains: Iterable[str]) -> bool:
+    """True when *host* is one of *domains* or a subdomain of one."""
+    return any(host == domain or host.endswith("." + domain) for domain in domains)
+
+
+def source_type(url: object) -> str:
+    """Classify a page by what kind of source it is (deterministic).
+
+    One of ``academic``, ``institution``, ``reference``, ``news``, ``docs``,
+    ``forum``, ``video``, or ``web``. This is what keeps a YouTube clip and a
+    peer-reviewed paper from carrying the same evidence-quality score, and it
+    is shown in the bibliography so the reader can judge the list themselves.
+    """
+    canonical = canonical_url(url)
+    if not canonical:
+        return "web"
+    try:
+        parsed = urlparse(canonical)
+    except Exception:
+        return "web"
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+
+    if _host_matches(host, _VIDEO_HOSTS):
+        return "video"
+    # Facebook is a social network, but a /videos/ page is a video first.
+    if _host_matches(host, ("facebook.com", "fb.watch")) and (
+        "/videos/" in path or "watch" in path
+    ):
+        return "video"
+    if _host_matches(host, _FORUM_HOSTS):
+        return "forum"
+    if _host_matches(host, _ACADEMIC_HOSTS):
+        return "academic"
+    # A university's newsroom is an institution, not a paper: med.stanford.edu
+    # /news is a press article, and news.osu.edu is a news desk.
+    if host.startswith("news."):
+        return "news"
+    if any(segment in path for segment in ("/news/", "/blog/", "/insights/")):
+        if host.endswith((".edu", ".ac.uk", ".edu.au")):
+            return "institution"
+    if _host_matches(host, _INSTITUTION_HOSTS) or host.endswith((".gov", ".gov.uk", ".mil")):
+        return "institution"
+    if host.endswith((".edu", ".ac.uk", ".edu.au")):
+        return "academic"
+    if _host_matches(host, _REFERENCE_HOSTS):
+        return "reference"
+    if _host_matches(host, _DOCS_HOSTS) or host.startswith("docs."):
+        return "docs"
+    if _host_matches(host, _NEWS_HOSTS):
+        return "news"
+    return "web"
+
+
+def source_type_label(kind: str) -> str:
+    """Human label for a :func:`source_type` value."""
+    return _SOURCE_TYPE_LABEL.get(str(kind or "").lower(), "Web page")
+
+
+# Raw page text arrives as markdown or HTML soup: the analysis prompt used to
+# start with `![logo](/img/s.png)` and a nav bar, spending its excerpt budget
+# on things that are not evidence. These remove the cheap noise and nothing
+# else — no sentence is rewritten, so a page cannot be made to say more.
+_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_HTML_TAG_RE = re.compile(r"<[^>]{1,300}>")
+_BOILERPLATE_LINE_RE = re.compile(
+    r"^\s*(?:skip to (?:main )?content|jump to (?:main )?content|"
+    r"toggle navigation|accept (?:all )?cookies|advertisement|"
+    r"menu|search|share|subscribe|sign in|log in)\s*$",
+    re.IGNORECASE,
+)
+
+
+def clean_page_text(text: object) -> str:
+    """Strip page chrome from fetched text before it reaches a prompt.
+
+    Removes markdown images, keeps link labels, drops HTML tags, one-line
+    cookie/navigation boilerplate, and lines with no alphanumerics. Paragraph
+    breaks are preserved so the model can still see structure.
+    """
+    raw = str(text or "")
+    if not raw:
+        return ""
+    cleaned = _MD_IMAGE_RE.sub(" ", raw)
+    cleaned = _MD_LINK_RE.sub(lambda match: match.group(1) or " ", cleaned)
+    cleaned = _HTML_TAG_RE.sub(" ", cleaned)
+    lines = []
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            lines.append("")
+            continue
+        if _BOILERPLATE_LINE_RE.match(stripped):
+            continue
+        if not re.search(r"[A-Za-z0-9]", stripped):
+            continue
+        lines.append(re.sub(r"[ \t]+", " ", stripped))
+    result = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+    return result
+
+# Tavily scores each result for relevance to the query. 0.02 is a page that
+# matched one word; keeping it because it is long is how a report about heat
+# pumps ended up citing the 1995 film Heat. A missing score arrives as 0.0 and
+# is treated as unknown, not as irrelevant.
+_MIN_RELEVANCE = 0.15
+
 _MIN_TEXT_CHARS = 120
 _FINGERPRINT_CHARS = 320
 _FINGERPRINT_MIN_CHARS = 160
@@ -298,6 +468,9 @@ def is_usable_result(result) -> bool:
     text = _best_text(result)
     score = _as_float(getattr(result, "score", 0.0))
 
+    if 0 < score < _MIN_RELEVANCE:
+        return False
+
     if len(text) < _MIN_TEXT_CHARS:
         # A short snippet is acceptable only when the search engine is very
         # confident and there is at least a real title to identify it.
@@ -314,8 +487,11 @@ def quality_score(result) -> float:
     """A 0-1 estimate of how much useful evidence a result carries.
 
     Blends the search engine's relevance score, the amount of text actually
-    retrieved, the category prior, and whether the title identifies the page.
-    It is intentionally simple and explainable; no model call is needed.
+    retrieved, the category prior, and whether the title identifies the page,
+    then multiplies by a source-type prior. The multiplier is what stops a
+    long vendor page or a YouTube clip from scoring like a paper: length and
+    relevance alone had every marketing page at 0.9+. Intentionally simple
+    and explainable; no model call is needed.
     """
     text = _best_text(result)
     relevance = _clamp(_as_float(getattr(result, "score", 0.0)))
@@ -324,8 +500,10 @@ def quality_score(result) -> float:
         str(getattr(result, "category", None) or "general").lower(), 0.8
     )
     title = 1.0 if len(str(getattr(result, "title", None) or "").strip()) >= 12 else 0.55
+    kind = source_type(getattr(result, "url", ""))
 
-    score = 0.45 * relevance + 0.30 * length + 0.15 * category + 0.10 * title
+    blend = 0.45 * relevance + 0.30 * length + 0.15 * category + 0.10 * title
+    score = blend * _SOURCE_TYPE_PRIOR.get(kind, 0.80)
     canonical = canonical_url(getattr(result, "url", ""))
     if canonical and _is_low_value_url(canonical):
         score *= 0.5
@@ -484,6 +662,7 @@ class SourceEntry:
     score: float
     published_date: str = ""
     analyzed: bool = False
+    source_type: str = "web"
 
 
 def build_source_registry(results: Iterable) -> Tuple[Dict[str, int], List[SourceEntry]]:
@@ -522,6 +701,7 @@ def build_source_registry(results: Iterable) -> Tuple[Dict[str, int], List[Sourc
             score=round(_as_float(getattr(result, "score", 0.0)), 3),
             published_date=str(getattr(result, "published_date", None) or "").strip(),
             analyzed=bool(getattr(result, "analyzed", False)),
+            source_type=source_type(str(getattr(result, "url", None) or "")),
         ))
 
     return numbers, entries

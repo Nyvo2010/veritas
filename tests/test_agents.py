@@ -326,6 +326,37 @@ class SearchFailureCountingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.total_searches, 1)
 
 
+class OffTopicSearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unrelated_results_are_treated_as_an_empty_search(self):
+        class _MovieResults:
+            def search(self, **kwargs):
+                return {"results": [
+                    {
+                        "url": "https://en.wikipedia.org/wiki/Heat",
+                        "title": "Heat - Wikipedia",
+                        "content": "Heat is energy in transfer to or from a system. " * 20,
+                        "score": 0.24,
+                    },
+                    {
+                        "url": "https://www.imdb.com/title/tt0113277",
+                        "title": "Heat (1995) - IMDb",
+                        "content": "A crime film directed by Michael Mann. " * 20,
+                        "score": 0.02,
+                    },
+                ]}
+
+        state = ResearchState(main_query="q", category_toggles={})
+        agent = SearchAgent(_MovieResults(), llm_client=None)
+        question = SubQuestion(id="q1", question="heat pumps vs hydrogen boilers")
+
+        results = await agent.execute_search(question, state)
+
+        self.assertEqual(results, [])
+        self.assertEqual(state.search_results, [],
+                         "off-topic pages must not reach the bibliography")
+        self.assertEqual(state.total_searches, 1)
+
+
 class SynthesisCitationTests(unittest.TestCase):
     def test_finding_sources_follow_the_models_cited_indices(self):
         state = _finding_state()
@@ -466,6 +497,40 @@ class MultiFindingTests(unittest.TestCase):
         state = _run_analysis(_AnalysisLLM([1]))
         self.assertEqual(len(state.findings), 1)
         self.assertEqual(state.findings[0].content, "A supported answer.")
+
+
+class _FindingsWithoutAnswerLLM:
+    """Findings array populated, answer sentence empty.
+
+    The extraction used to sit inside ``if answer:``, so these points were
+    silently thrown away even though the model had produced them.
+    """
+
+    def analyze_search_results(self, question, search_results, previous_findings=None):
+        return {
+            "answer": "",
+            "confidence": 0.7,
+            "source_indices": [1],
+            "findings": [
+                {"claim": "4-bit weights halve memory traffic.", "source_indices": [1]},
+                {"claim": "Calibration is required for outlier channels.",
+                 "source_indices": [2]},
+            ],
+            "contradictions": [],
+            "gaps": [],
+            "needs_more_research": False,
+        }
+
+
+class FindingsWithoutAnswerTests(unittest.TestCase):
+    def test_points_survive_when_the_answer_sentence_is_empty(self):
+        state = _run_analysis(_FindingsWithoutAnswerLLM())
+
+        self.assertEqual(len(state.findings), 2)
+        self.assertEqual(state.findings[0].sources, ["https://one.example"])
+        self.assertEqual(state.findings[1].sources, ["https://two.example"])
+        self.assertEqual(state.findings[0].confidence, 0.7)
+        self.assertEqual(state.findings[0].question_id, "q1")
 
 
 class _DecomposeListLLM:

@@ -18,7 +18,9 @@ from models.research_state import (
     ResearchState
 )
 from utils.llm_client import LLMClient
+from utils.sources import source_type
 from utils.text import as_int, clip, is_near_duplicate, string_list
+from utils.ui_manager import notify
 
 log = logging.getLogger("veritas.synthesis")
 
@@ -74,6 +76,7 @@ class SynthesisAgent:
                 "content": r.full_content or r.content or "",
                 "score": r.score,
                 "category": r.category,
+                "source_type": source_type(r.url),
                 "quality": getattr(r, "quality", 0.0),
                 "published_date": getattr(r, "published_date", None),
             }
@@ -102,25 +105,35 @@ class SynthesisAgent:
         # field requested as a list can arrive as one string, which would
         # otherwise be iterated character by character.
         answer = str(analysis.get('answer') or '').strip()
+        try:
+            confidence = float(analysis.get('confidence', 0.5))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        confidence = max(0.0, min(1.0, confidence))
+
+        # Findings are extracted even when ``answer`` is empty: a reply can
+        # carry a populated ``findings`` array and no summary sentence, and
+        # gating on the answer would silently throw every point away.
+        findings = self._extract_findings(
+            analysis, question, search_results, state, confidence
+        )
+        state.findings.extend(findings)
+
+        # Update question
         if answer:
-            try:
-                confidence = float(analysis.get('confidence', 0.5))
-            except (TypeError, ValueError):
-                confidence = 0.5
-            confidence = max(0.0, min(1.0, confidence))
-
-            findings = self._extract_findings(
-                analysis, question, search_results, state, confidence
-            )
-            state.findings.extend(findings)
-
-            # Update question
             question.answer = answer
 
-            # Show the answer, clipped: the panel keeps one line per entry.
-            if ui_manager:
-                label = "Insight" if len(findings) == 1 else f"{len(findings)} insights"
-                ui_manager.add_message(f"{label}: {clip(answer)}", style="white")
+        if findings and not answer:
+            log.info(
+                "analysis for %r returned %s findings but no answer",
+                clip(question.question, 60), len(findings),
+            )
+
+        # Show the answer, clipped: the panel keeps one line per entry.
+        if ui_manager and (answer or findings):
+            label = f"{len(findings)} insights" if len(findings) > 1 else "Insight"
+            shown = answer or findings[0].content
+            notify(ui_manager, "insight", f"{label}: {clip(shown)}")
         
         # Store identified gaps
         for gap_desc in string_list(analysis.get('gaps')):
@@ -300,16 +313,19 @@ the reader has not seen them."""
             
             if ui_manager:
                 # Show only: Analyzing findings found (x) conflicts/agreements, (x) uncertainties
-                consensus_count = len(cross_ref.get('consensus_points', []))
-                contradiction_count = len(cross_ref.get('contradictions', []))
+                # A model can answer a requested list with null; `len(None)`
+                # would discard the whole cross-reference result after it was
+                # paid for.
+                consensus_count = len(cross_ref.get('consensus_points') or [])
+                contradiction_count = len(cross_ref.get('contradictions') or [])
                 
                 # Count uncertainties from low confidence findings
                 uncertainty_count = sum(1 for f in state.findings if f.confidence < 0.6)
                 
-                ui_manager.add_message(
+                notify(
+                    ui_manager, "info",
                     f"Analyzing Findings: {consensus_count} agreements, "
                     f"{contradiction_count} conflicts, {uncertainty_count} uncertainties",
-                    style="white"
                 )
             
             return cross_ref
@@ -317,6 +333,6 @@ the reader has not seen them."""
         except Exception as e:
             log.warning("cross-reference failed: %s", e, exc_info=True)
             if ui_manager:
-                ui_manager.add_message(f"Cross-reference error: {clip(str(e))}", style="yellow")
+                notify(ui_manager, "warn", f"Cross-reference error: {clip(str(e))}")
 
             return {"consensus": [], "contradictions": []}

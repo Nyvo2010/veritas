@@ -46,6 +46,7 @@ class ScreenRenderTests(unittest.IsolatedAsyncioTestCase):
         tui_app.log_sig.set(())
         tui_app.clear_notice()
         tui_app.stats_sig.set(())
+        tui_app.counts_sig.set((0, 0, 0))
         tui_app.prog_sig.set((0.0, 1, "Starting..."))
         tui_app.phase_sig.set("Preparing...")
         tui_app.state["query"] = ""
@@ -88,13 +89,71 @@ class ScreenRenderTests(unittest.IsolatedAsyncioTestCase):
             tui_app.phase_sig.set("Phase 2: Research and Analysis")
             tui_app.anim_sig.set(20)
             tui_app.stats_sig.set((("llm", 204.0, 14), ("search", 38.0, 6)))
+            tui_app.counts_sig.set((3, 7, 21))
 
         frame = await self.render("run", 100, 40, prepare)
         self.assertIn("Research running", frame)
+        # Three labelled blocks, not one wall of text: context, log, progress.
+        self.assertIn("Activity", frame)
+        self.assertIn("Progress", frame)
         self.assertIn("\u28ff", frame, "progress bar should use braille cells")
         self.assertIn("\u258e", frame, "phase entries should render as headings")
         self.assertIn("LLM", frame, "the time breakdown belongs on the run screen")
         self.assertIn("Phase 2: Research and Analysis", frame)
+        # The status the orchestrator publishes every step must be visible.
+        self.assertIn("Iteration 2/10", frame)
+        self.assertIn("3 answers", frame)
+        self.assertIn("21 sources", frame)
+
+    async def test_run_screen_cards_are_padded_the_same_way(self):
+        """Every tinted block keeps one blank row above and below its text.
+
+        The header and progress cards used to be drawn with pad_y=0, so their
+        text touched the background edge while the activity card had a row of
+        padding — the inconsistency is visible at a glance. Asserting the
+        frame, not the code, is what catches it coming back.
+        """
+
+        def prepare():
+            tui_app.state["query"] = "How do on-device NPUs change mobile AI?"
+            tui_app.log_sig.set(SAMPLE_LOG)
+            tui_app.prog_sig.set((5.0, 28, "Iteration 2/10"))
+            tui_app.phase_sig.set("Phase 2: Research and Analysis")
+
+        setup = await test_render(tui_app.App, {"width": 100, "height": 40})
+        try:
+            prepare()
+            tui_app.screen.set("run")
+            setup.render_frame()
+            frame = setup.capture_spans()
+        finally:
+            setup.destroy()
+
+        # A row belongs to a card when any cell carries the panel background.
+        def tinted(line):
+            return any(
+                span.bg is not None and getattr(span.bg, "a", 0) > 0
+                for span in line.spans
+            )
+
+        def text_of(line):
+            return "".join(span.text for span in line.spans)
+
+        cards, current = [], []
+        for line in frame.lines:
+            if tinted(line):
+                current.append(line)
+            elif current:
+                cards.append(current)
+                current = []
+        if current:
+            cards.append(current)
+
+        self.assertGreaterEqual(len(cards), 3, "expected three tinted cards")
+        for card in cards:
+            with self.subTest(first=text_of(card[0]).strip()):
+                self.assertEqual(text_of(card[0]).strip(), "", "no padding above the title")
+                self.assertEqual(text_of(card[-1]).strip(), "", "no padding below the last line")
 
     async def test_run_screen_keeps_its_height_as_events_arrive(self):
         def prepare():

@@ -21,15 +21,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import asyncio  # noqa: E402
 
 from main import DeepResearchAgent  # noqa: E402
-from agents.report_generator import ReportGeneratorAgent  # noqa: E402
+from agents.report_generator import (  # noqa: E402
+    ReportGeneratorAgent,
+    _cap_source_citations,
+    _clean_title,
+    _select_excerpt,
+)
 from utils.llm_client import LLMClient  # noqa: E402
-from utils.sources import build_source_registry  # noqa: E402
+from utils.sources import SourceEntry, build_source_registry  # noqa: E402
 
 logging.getLogger("veritas").setLevel(logging.INFO)  # keep test output quiet
 from models.research_state import (  # noqa: E402
     KnowledgeFinding,
     QuestionStatus,
     ReportSection,
+    ResearchGap,
     ResearchState,
     SearchResult,
     SubQuestion,
@@ -38,6 +44,12 @@ from models.research_state import (  # noqa: E402
 
 def make_state(query="Why is the sky blue?"):
     return ResearchState(main_query=query, category_toggles={"general": True})
+
+
+def _gap(description, severity="moderate"):
+    return ResearchGap(
+        description=description, question_id="overall", severity=severity
+    )
 
 
 def make_agent(reports_dir):
@@ -519,7 +531,7 @@ class SectionScopeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MetaAnalysisRenderingTests(unittest.TestCase):
-    def test_gaps_section_uses_cross_reference(self):
+    def test_cross_reference_has_its_own_section_content(self):
         state = make_state()
         state.cross_reference = {
             "consensus_points": [
@@ -528,15 +540,78 @@ class MetaAnalysisRenderingTests(unittest.TestCase):
             "contradictions": [
                 {"topic": "Cost", "viewpoint_a": "Cheap", "viewpoint_b": "Expensive"},
             ],
+            "overall_confidence": 0.72,
             "reliability_assessment": "Peer-reviewed sources dominate.",
         }
 
-        content = ReportGeneratorAgent(None)._generate_gaps_section(state)
+        content = ReportGeneratorAgent(None)._generate_cross_reference_section(state)
 
         self.assertIn("Points of agreement", content)
         self.assertIn("Both sources agree on X", content)
         self.assertIn("**Cost**: Cheap — Expensive", content)
+        # The paid-for self-rating is disclosed as the model's view.
+        self.assertIn("rated its own confidence", content)
+        self.assertIn("72%", content)
         self.assertIn("Peer-reviewed sources dominate.", content)
+
+    def test_overused_citations_are_reported_by_source_title(self):
+        entry = SourceEntry(
+            number=4, url="https://vendor.example/post", title="A vendor page",
+            category="general", quality=0.8, score=0.9, source_type="web",
+        )
+        section = ReportSection(
+            title="Cost",
+            content="A [Source 4]. B [Source 4]. C [Source 4]. D [Source 4].",
+            sources=[], order=0,
+        )
+
+        overused = ReportGeneratorAgent._overused_citations([section], [entry])
+
+        self.assertEqual(overused, [("Cost", "A vendor page", 4)])
+
+    def test_cross_reference_is_not_buried_in_the_gaps_section(self):
+        state = make_state()
+        state.cross_reference = {
+            "consensus_points": [{"point": "Both sources agree on X"}],
+        }
+
+        gaps = ReportGeneratorAgent(None)._generate_gaps_section(state)
+
+        self.assertNotIn("Points of agreement", gaps)
+
+    def test_minor_gaps_are_rendered_instead_of_dropped(self):
+        state = make_state()
+        state.gaps = [
+            _gap("Exact per-model numbers vary by evaluation harness", "minor"),
+        ]
+
+        content = ReportGeneratorAgent(None)._generate_gaps_section(state)
+
+        self.assertIn("### Minor gaps", content)
+        self.assertIn("Exact per-model numbers vary by evaluation harness", content)
+
+    def test_gaps_that_restate_each_other_are_printed_once(self):
+        state = make_state()
+        state.gaps = [
+            _gap("Observed sodium cell prices contradict modeled cost corridors", "critical"),
+            _gap("Modeled sodium cost corridors conflict with observed cell prices", "moderate"),
+        ]
+
+        content = ReportGeneratorAgent(None)._generate_gaps_section(state)
+
+        self.assertEqual(content.count("Observed sodium cell prices"), 1)
+        self.assertNotIn("Modeled sodium cost corridors", content)
+
+    def test_planned_but_unresearched_questions_are_listed(self):
+        state = make_state()
+        state.add_question(SubQuestion(id="q1", question="answered question"))
+        state.add_question(SubQuestion(id="q2", question="manufacturing scale 2026"))
+        state.mark_question_completed("q1")
+
+        content = ReportGeneratorAgent(None)._generate_gaps_section(state)
+
+        self.assertIn("Not answered", content)
+        self.assertIn("manufacturing scale 2026", content)
 
 
 
@@ -559,14 +634,32 @@ class GapRecordingTests(unittest.TestCase):
 
 
 class _ReportPipelineLLM:
-    """Deterministic stand-in for the three model calls a report makes."""
+    """Deterministic stand-in for the model calls a report makes.
+
+    ``unsupported`` feeds the citation support checker; ``support_error``
+    makes it fail; ``section_content`` overrides the section prose.
+    """
 
     model = "stub-model"
 
-    def __init__(self):
+    def __init__(self, unsupported=None, support_error=False, section_content=None):
         self.seen_findings = None
         self.other_sections = None
         self.other_by_section = {}
+        self.unsupported = unsupported or []
+        self.support_error = support_error
+        self.section_content = section_content
+        self.support_claims = None
+        self.support_evidence = None
+        self.support_thread = None
+
+    def check_citation_support(self, claims, evidence):
+        self.support_claims = claims
+        self.support_evidence = evidence
+        self.support_thread = threading.current_thread().name
+        if self.support_error:
+            raise RuntimeError("judge unavailable")
+        return list(self.unsupported)
 
     def identify_report_themes(self, findings):
         return {"themes": [
@@ -582,6 +675,8 @@ class _ReportPipelineLLM:
         self.seen_evidence = evidence_sources
 
         async def run():
+            if self.section_content is not None:
+                return self.section_content
             return (
                 "A supported claim [Source 1]. "
                 "A corroborated claim [Sources 2, 1]. "
@@ -591,8 +686,9 @@ class _ReportPipelineLLM:
         return run()
 
     def generate_executive_summary(self, main_query, key_findings,
-                                   source_numbers=None):
+                                   source_numbers=None, target_words=600):
         self.summary_numbers = sorted(source_numbers or [])
+        self.summary_target_words = target_words
         return "A summary that keeps a section citation [Source 1]."
 
 
@@ -653,13 +749,273 @@ class ReportCitationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Sources: 2 cited of 3 reviewed", report)
         self.assertIn("## Mechanism", report)
         self.assertIn("## Sources", report)
-        self.assertIn("1. [Source 1] **Quantization paper**", report)
+        self.assertIn("[Source 1] **Quantization paper**", report)
         self.assertIn("Published: 2026-01-02", report)
-        self.assertIn("2. [Source 2] **Quantization analysis**", report)
+        self.assertIn("[Source 2] **Quantization analysis**", report)
+        # The numbered entry is the citation target, so it is not labelled
+        # twice; the page kind replaces the useless "General" category, and
+        # the internal ranking scores stay out of the document.
+        self.assertNotIn("1. [Source 1]", report)
+        self.assertNotIn("quality heuristic", report)
+        self.assertNotIn("search relevance", report)
         self.assertIn("1 additional source was reviewed but not cited", report)
         self.assertNotIn("https://example.net/collected", report)
         self.assertEqual(state.report_sections[0].sources,
                          ["https://example.com/paper", "https://example.org/analysis"])
+        # A summary longer than the shortest section is a second body.
+        self.assertLessEqual(llm.summary_target_words, 450)
+        self.assertGreaterEqual(llm.summary_target_words, 250)
+
+    async def test_markers_the_evidence_does_not_support_are_dropped(self):
+        state = make_state("a question")
+        state.search_results = [SearchResult(
+            url="https://example.com/paper", title="Paper",
+            content="paper " * 100, score=0.9, category="educational",
+        )]
+        state.findings = [KnowledgeFinding(
+            content="A point.", sources=["https://example.com/paper"],
+            confidence=0.8, question_id="q1",
+        )]
+        llm = _ReportPipelineLLM(
+            unsupported=["M2"],
+            section_content=(
+                "A supported claim [Source 1]. "
+                "A stretched claim [Source 1]."
+            ),
+        )
+
+        report = await ReportGeneratorAgent(llm).generate_report(state)
+
+        self.assertIn("A supported claim [Source 1].", report)
+        self.assertIn("A stretched claim.", report)
+        self.assertNotIn("A stretched claim [Source 1]", report)
+        # The checker saw the marker id and the claim, not the whole section.
+        self.assertEqual([claim["id"] for claim in llm.support_claims], ["M1", "M2"])
+        self.assertTrue(llm.support_evidence)
+
+    def _one_section_state(self):
+        state = make_state("a question")
+        state.search_results = [SearchResult(
+            url="https://example.com/paper", title="Paper",
+            content="paper " * 100, score=0.9, category="educational",
+        )]
+        state.findings = [KnowledgeFinding(
+            content="A point.", sources=["https://example.com/paper"],
+            confidence=0.8, question_id="q1",
+        )]
+        return state
+
+    async def test_the_header_states_what_the_citation_audit_checked(self):
+        llm = _ReportPipelineLLM(
+            unsupported=["M2"],
+            section_content=(
+                "A supported claim [Source 1]. "
+                "A stretched claim [Source 1]."
+            ),
+        )
+
+        report = await ReportGeneratorAgent(llm).generate_report(
+            self._one_section_state()
+        )
+
+        self.assertIn("Source check: 1 of 2 section citations verified", report)
+
+    async def test_an_unavailable_judge_does_not_claim_an_audit(self):
+        llm = _ReportPipelineLLM(
+            support_error=True,
+            section_content="A supported claim [Source 1].",
+        )
+
+        report = await ReportGeneratorAgent(llm).generate_report(
+            self._one_section_state()
+        )
+
+        # Zero checked means no audit ran; claiming "1 of 1 supported" would
+        # turn a judge outage into a clean bill of health.
+        self.assertNotIn("Source check", report)
+
+    async def test_a_partial_audit_is_not_summed_up_as_a_whole_report(self):
+        """One section losing its judge must not leave a header that implies
+        every section was checked."""
+
+        class _FlakyJudge(_ReportPipelineLLM):
+            calls = 0
+
+            def check_citation_support(self, claims, evidence):
+                type(self).calls += 1
+                if type(self).calls == 2:
+                    raise RuntimeError("judge went away")
+                return super().check_citation_support(claims, evidence)
+
+        state = make_state("a question")
+        state.search_results = [SearchResult(
+            url="https://example.com/paper", title="Paper",
+            content="paper " * 100, score=0.9, category="educational",
+        )]
+        for i in range(2):
+            state.findings.append(KnowledgeFinding(
+                content=f"point {i}",
+                sources=["https://example.com/paper"],
+                confidence=0.8, question_id=f"q{i}",
+            ))
+
+        report = await ReportGeneratorAgent(_FlakyJudge()).generate_report(state)
+
+        self.assertIn("## ", report)
+        self.assertNotIn("Source check", report)
+
+    async def test_the_support_check_runs_off_the_event_loop_thread(self):
+        """The judge is a blocking model call; on the loop it stalls every
+        other section that is still waiting for its response."""
+        llm = _ReportPipelineLLM(section_content="A claim [Source 1].")
+
+        await ReportGeneratorAgent(llm).generate_report(self._one_section_state())
+
+        self.assertIsNotNone(llm.support_thread)
+        self.assertNotEqual(llm.support_thread, threading.current_thread().name)
+
+    async def test_a_failed_support_check_keeps_every_marker(self):
+        state = make_state("a question")
+        state.search_results = [SearchResult(
+            url="https://example.com/paper", title="Paper",
+            content="paper " * 100, score=0.9, category="educational",
+        )]
+        state.findings = [KnowledgeFinding(
+            content="A point.", sources=["https://example.com/paper"],
+            confidence=0.8, question_id="q1",
+        )]
+        llm = _ReportPipelineLLM(
+            support_error=True,
+            section_content="A supported claim [Source 1].",
+        )
+
+        report = await ReportGeneratorAgent(llm).generate_report(state)
+
+        self.assertIn("A supported claim [Source 1].", report)
+
+    async def test_header_reports_question_coverage(self):
+        state = make_state()
+        state.add_question(SubQuestion(id="q1", question="answered"))
+        state.add_question(SubQuestion(id="q2", question="never reached"))
+        state.mark_question_completed("q1")
+        state.findings = [KnowledgeFinding(
+            content="A point.", sources=[], confidence=0.8, question_id="q1"
+        )]
+
+        report = await ReportGeneratorAgent(_ReportPipelineLLM()).generate_report(state)
+
+        self.assertIn("Questions: 1 answered of 2", report)
+        self.assertIn("## Uncertainties and Knowledge Gaps", report)
+        self.assertIn("never reached", report)
+
+    async def test_a_run_with_no_findings_does_not_call_the_model(self):
+        state = make_state("a question nothing answered")
+        state.add_question(SubQuestion(id="q1", question="unanswerable thing"))
+        state.get_question_by_id("q1").status = QuestionStatus.FAILED
+        state.search_results = [SearchResult(
+            url="https://example.com/movie",
+            title="A 1995 film",
+            content="x" * 600,
+            score=0.9,
+            category="general",
+        )]
+
+        report = await ReportGeneratorAgent(None).generate_report(state)
+
+        self.assertIn("No usable findings were collected", report)
+        self.assertIn("unanswerable thing", report)
+        self.assertIn("No sources were cited", report)
+        self.assertIn("Questions: 0 answered of 1", report)
+
+
+class SupportJudgeReplyTests(unittest.TestCase):
+    """A reply that is not a verdict must not be read as "all supported"."""
+
+    class _ReplyLLM(LLMClient):
+        def __init__(self, reply):
+            self.reply = reply
+
+        def chat_json(self, *args, **kwargs):
+            return self.reply
+
+    CLAIMS = [{"id": "M1", "source": 1, "sentence": "A claim."}]
+    EVIDENCE = [{"number": 1, "title": "Paper", "content": "The excerpt."}]
+
+    def test_a_reply_without_the_key_is_a_failure(self):
+        llm = self._ReplyLLM({"notes": "looks fine to me"})
+        with self.assertRaises(ValueError):
+            llm.check_citation_support(self.CLAIMS, self.EVIDENCE)
+
+    def test_an_empty_list_is_a_real_verdict(self):
+        llm = self._ReplyLLM({"unsupported": []})
+        self.assertEqual(
+            llm.check_citation_support(self.CLAIMS, self.EVIDENCE), []
+        )
+
+
+class CitationCapTests(unittest.TestCase):
+    def test_repeat_markers_past_the_cap_lose_only_the_marker(self):
+        content = (
+            "One [Source 2]. Two [Source 2]. Three [Source 2]. "
+            "Four [Source 2]. Five [Source 3]."
+        )
+
+        capped, removed = _cap_source_citations(content)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(capped.count("[Source 2]"), 3)
+        self.assertIn("Four.", capped)
+        self.assertIn("Five [Source 3].", capped)
+
+    def test_a_dropped_trailing_marker_leaves_no_stray_space(self):
+        capped, removed = _cap_source_citations(
+            "A [Source 1]. B [Source 1]. C [Source 1]. D [Source 1].", cap=1
+        )
+
+        self.assertEqual(removed, 3)
+        self.assertEqual(capped, "A [Source 1]. B. C. D.")
+
+
+class SectionTitleTests(unittest.TestCase):
+    def test_a_raw_question_becomes_a_heading(self):
+        self.assertEqual(
+            _clean_title("needle in a haystack test results for long context LLMs?"),
+            "Needle in a haystack test results for long context LLMs?",
+        )
+        self.assertEqual(_clean_title("how quantization works."),
+                         "How quantization works")
+
+    def test_acronyms_and_proper_nouns_keep_their_casing(self):
+        self.assertEqual(_clean_title("eBPF probes inside RAG pipelines"),
+                         "eBPF probes inside RAG pipelines")
+
+    def test_whitespace_is_collapsed(self):
+        self.assertEqual(_clean_title("  spaced\n\nout  "), "Spaced out")
+
+
+class ExcerptSelectionTests(unittest.TestCase):
+    def test_the_relevant_paragraph_beats_the_page_head(self):
+        raw = (
+            "Home About Contact\n\n"
+            + "Botanical gardens in the city open at nine. " * 3
+            + "\n\nAttention calibration and positional bias reduce the "
+            "lost-in-the-middle effect in long contexts."
+        )
+
+        excerpt = _select_excerpt(raw, "attention calibration positional bias", chars=200)
+
+        self.assertTrue(excerpt.startswith("Attention calibration"), excerpt)
+        self.assertLessEqual(len(excerpt), 200)
+
+    def test_a_page_with_no_overlap_keeps_its_head(self):
+        raw = "Alpha beta gamma delta. " * 20
+
+        excerpt = _select_excerpt(raw, "quantization", chars=200)
+
+        self.assertTrue(excerpt.startswith("Alpha beta gamma delta."))
+
+    def test_a_short_page_is_returned_whole(self):
+        self.assertEqual(_select_excerpt("Short page.", "quantization", 200), "Short page.")
 
 
 class EvidenceSourceTests(unittest.TestCase):
@@ -700,6 +1056,59 @@ class EvidenceSourceTests(unittest.TestCase):
         included = [item["number"] for item in picked]
         self.assertNotIn(numbers[other_question.url], included)
         self.assertNotIn(numbers[unread.url], included)
+
+    def test_extras_used_by_another_section_are_taken_last(self):
+        state = make_state("q")
+        own = SearchResult(url="https://own.example/a", title="Own",
+                           content="o" * 200, score=0.5, question_id="q1")
+        high = SearchResult(url="https://high.example/b", title="High",
+                            content="h" * 200, score=0.9, quality=0.9,
+                            question_id="q1", analyzed=True)
+        low = SearchResult(url="https://low.example/c", title="Low",
+                           content="l" * 200, score=0.3, quality=0.4,
+                           question_id="q1", analyzed=True)
+        state.search_results = [own, high, low]
+
+        numbers, _ = build_source_registry(state.search_results)
+        finding = KnowledgeFinding(
+            content="claim", sources=[own.url], confidence=0.7, question_id="q1"
+        )
+
+        picked = ReportGeneratorAgent._evidence_sources(
+            state, [finding], numbers, avoid={numbers[high.url]}
+        )
+
+        # The higher-quality page is still available, but it is what the
+        # previous section read, so this one takes the unclaimed page first.
+        self.assertEqual(
+            [item["number"] for item in picked],
+            [numbers[own.url], numbers[low.url], numbers[high.url]],
+        )
+
+    def test_reused_pages_stop_at_the_floor(self):
+        state = make_state("q")
+        own = SearchResult(url="https://own.example/a", title="Own",
+                           content="o" * 200, score=0.5, question_id="q1")
+        extras = [
+            SearchResult(url=f"https://shared.example/{i}", title=f"Shared {i}",
+                         content=("s" * 100) + str(i), score=0.8,
+                         question_id="q1", analyzed=True)
+            for i in range(5)
+        ]
+        state.search_results = [own] + extras
+
+        numbers, _ = build_source_registry(state.search_results)
+        finding = KnowledgeFinding(
+            content="claim", sources=[own.url], confidence=0.7, question_id="q1"
+        )
+
+        picked = ReportGeneratorAgent._evidence_sources(
+            state, [finding], numbers, avoid={numbers[e.url] for e in extras}
+        )
+
+        # Four is enough for a section; topping it up to the six-page limit
+        # with pages another section already read is how prose repeats.
+        self.assertEqual(len(picked), 4)
 
     def test_excerpts_are_capped(self):
         state = make_state("q")

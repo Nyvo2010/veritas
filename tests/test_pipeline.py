@@ -119,7 +119,7 @@ class _Synthesis:
 
 
 class _Report:
-    async def generate_report(self, state, ui, completed):
+    async def generate_report(self, state, ui):
         # Mirrors the real generator, which owns state.final_report.
         state.final_report = "# Report\n"
         return state.final_report
