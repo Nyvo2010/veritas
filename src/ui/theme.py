@@ -76,6 +76,7 @@ GLYPH_OK = "+"
 GLYPH_WARN = "!"
 GLYPH_ERR = "x"
 GLYPH_INSIGHT = "-"
+GLYPH_INFO = "·"
 
 # Selectable UI color schemes (primary accent only; rest of palette is fixed).
 # Settings store the theme name; apply_theme() activates it process-wide.

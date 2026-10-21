@@ -65,7 +65,6 @@ class ResearchGap:
     description: str
     question_id: str
     severity: str  # critical, moderate, minor
-    suggested_searches: List[str] = field(default_factory=list)
 
 
 @dataclass

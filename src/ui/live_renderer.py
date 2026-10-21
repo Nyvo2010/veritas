@@ -62,7 +62,7 @@ _LEVEL_GLYPH = {
     "ok": theme.GLYPH_OK,
     "warn": theme.GLYPH_WARN,
     "err": theme.GLYPH_ERR,
-    "info": "·",
+    "info": theme.GLYPH_INFO,
 }
 
 

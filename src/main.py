@@ -44,11 +44,6 @@ from config import (
 log = logging.getLogger("veritas.research")
 
 
-def _seconds(value: float) -> str:
-    """Short human duration for a log line: "2.4s", "1m 12s"."""
-    return f"{value:.0f}s" if value < 60 else format_duration(value)
-
-
 def _ui_log(ui, level: str, text: str) -> None:
     """Push one leveled line to the UI (and mirror it into the file log)."""
     if ui is None or not text:
@@ -128,7 +123,7 @@ class DeepResearchAgent:
             category_toggles: Dict controlling which website categories to include
         """
         self._settings = load_settings()
-        file_llm, file_tavily, file_base = resolve_api_keys(self._settings)
+        file_llm, file_tavily, _ = resolve_api_keys(self._settings)
         llm = resolve_llm(self._settings)
 
         # Initialize clients
@@ -232,7 +227,7 @@ class DeepResearchAgent:
                 asyncio.to_thread(self.query_analyzer.decompose_main_query, query, state, ui),
                 kind="llm", label="decompose_main_query", ui=ui,
             )
-            _ui_log(ui, "ok", f"Query decomposed into {len(sub_questions)} questions ({_seconds(elapsed)})")
+            _ui_log(ui, "ok", f"Query decomposed into {len(sub_questions)} questions ({format_duration(elapsed)})")
 
             state.reasoning_steps.append(f"Phase 1: Generated {len(sub_questions)} initial research questions")
             completed += 1
@@ -302,8 +297,8 @@ class DeepResearchAgent:
                          iteration, question.question, len(search_results), elapsed)
                 _ui_log(
                     ui, "ok",
-                    f"{len(search_results)} results in {_seconds(elapsed)}"
-                    if search_results else f"no results in {_seconds(elapsed)}",
+                    f"{len(search_results)} results in {format_duration(elapsed)}"
+                    if search_results else f"no results in {format_duration(elapsed)}",
                 )
                 _ui_counts(ui, state)
 
@@ -355,7 +350,7 @@ class DeepResearchAgent:
                 confidence = analysis.get('confidence', 0.0)
                 _ui_log(
                     ui, "insight",
-                    f"Answered ({confidence:.0%} confidence, {_seconds(elapsed)}): {clip(question.question)}",
+                    f"Answered ({confidence:.0%} confidence, {format_duration(elapsed)}): {clip(question.question)}",
                 )
 
                 state.reasoning_steps.append(f"  Analysis: {confidence:.0%} confidence")
@@ -379,7 +374,7 @@ class DeepResearchAgent:
                         state.reasoning_steps.append(f"  Follow-ups: Generated {len(follow_ups)} follow-up questions")
                         _ui_log(
                             ui, "ok",
-                            f"{len(follow_ups)} follow-up questions ({_seconds(elapsed)})",
+                            f"{len(follow_ups)} follow-up questions ({format_duration(elapsed)})",
                         )
 
                 # Mark question as completed
@@ -402,7 +397,7 @@ class DeepResearchAgent:
                         ui, "ok",
                         f"Gap review found {len(gap_items)} gaps"
                         + (f" ({added} new)" if added != len(gap_items) else "")
-                        + f" ({_seconds(elapsed)})",
+                        + f" ({format_duration(elapsed)})",
                     )
 
             # Phase 3: Cross-Reference Findings
@@ -423,7 +418,7 @@ class DeepResearchAgent:
                 state.cross_reference = (
                     cross_ref if isinstance(cross_ref, dict) else {}
                 )
-                _ui_log(ui, "ok", f"Findings cross-referenced ({_seconds(elapsed)})")
+                _ui_log(ui, "ok", f"Findings cross-referenced ({format_duration(elapsed)})")
             except Exception as e:
                 state.reasoning_steps.append(f"Phase 3: cross-reference failed: {e}")
                 log.warning("cross-reference failed: %s", e, exc_info=True)
@@ -450,7 +445,7 @@ class DeepResearchAgent:
                 )
                 _ui_log(
                     ui, "ok",
-                    f"Report written: {len(final_report):,} chars in {_seconds(elapsed)}",
+                    f"Report written: {len(final_report):,} chars in {format_duration(elapsed)}",
                 )
             except asyncio.TimeoutError:
                 error_msg = "Report generation timed out after 15 minutes"
@@ -587,7 +582,6 @@ class DeepResearchAgent:
                 description=description,
                 question_id="overall",
                 severity=severity,
-                suggested_searches=[],
             ))
             existing.append(description)
             added += 1
@@ -728,14 +722,16 @@ class DeepResearchAgent:
             report += "\n---\n\n## Sources\n\n" + source_lines + "\n"
         return report
 
-    def set_category_toggle(self, category: str, enabled: bool, silent: bool = False):
+    def set_category_toggle(self, category: str, enabled: bool) -> None:
         """
         Toggle a website category on/off
 
         Args:
             category: Category name (social, educational, open_knowledge, news, general)
             enabled: Whether to include this category
-            silent: Whether to suppress output
+
+        The toggle itself is silent: callers decide what to show, and the
+        settings screens redraw from ``category_toggles`` anyway.
         """
         if category in self.category_toggles:
             self.category_toggles[category] = enabled

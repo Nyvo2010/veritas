@@ -386,7 +386,6 @@ class _PromptLLM(LLMClient):
     def __init__(self):
         self.model = "stub-model"
         self.fallback_model = ""
-        self.using_fallback = False
         self._rate_limit_delay = 0.0
         self._last_api_call = 0.0
         self._sync_lock = threading.Lock()
@@ -1196,7 +1195,6 @@ class _SyncSectionLLM(LLMClient):
     def __init__(self):
         self.model = "stub-model"
         self.fallback_model = ""
-        self.using_fallback = False
         self._rate_limit_delay = 0.0
         self._last_api_call = 0.0
         self._sync_lock = threading.Lock()

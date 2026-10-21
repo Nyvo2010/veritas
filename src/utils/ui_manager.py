@@ -11,7 +11,7 @@ from typing import Optional
 from rich.console import Console
 
 from ui.live_renderer import LiveRenderer
-from utils.text import classify_message
+from utils.text import level_for_style
 
 
 def notify(ui, level: str, text: str) -> None:
@@ -104,14 +104,6 @@ class UIManager:
         if message is None:
             return
         text = str(message).strip()
-        if not text:
+        if not text or text.lower() in {"done", "done!"}:
             return
-        lowered = text.lower()
-        if lowered in {"done", "done!"}:
-            return
-        level = classify_message(text)
-        if style in ("red bold", "red", "bold red"):
-            level = "err"
-        elif style in ("yellow", "dim yellow"):
-            level = "warn"
-        self._renderer.log(level, text)
+        self._renderer.log(level_for_style(text, style), text)
