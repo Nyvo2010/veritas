@@ -78,6 +78,16 @@ _MIN_TEXT_CHARS = 120
 _FINGERPRINT_CHARS = 320
 _FINGERPRINT_MIN_CHARS = 160
 
+# Whole-text fingerprints. The prefix fingerprint above catches copies that
+# are identical from the first word; syndicated copies usually differ in the
+# site chrome around the article, so they are also compared by the words they
+# contain. 400 word tokens is about two paragraphs, enough to tell two
+# articles on the same subject apart.
+_SIGNATURE_CHARS = 8000
+_SIGNATURE_TOKENS = 400
+_SIGNATURE_MIN_TOKENS = 80
+_SIGNATURE_OVERLAP = 0.8
+
 
 def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
@@ -173,6 +183,76 @@ def content_fingerprint(result) -> str:
     if len(compact) < _FINGERPRINT_MIN_CHARS:
         return ""
     return compact[:_FINGERPRINT_CHARS]
+
+
+def content_signature(result) -> frozenset:
+    """The set of words a page contains, for near-duplicate detection.
+
+    Reads only the opening of the page (8k characters, 400 words): enough to
+    recognise an article behind different navigation, headers, and footers,
+    without hashing a whole book for every comparison.
+    """
+    text = _best_text(result)[:_SIGNATURE_CHARS]
+    tokens = re.findall(r"[a-z0-9]{3,}", text.lower())[:_SIGNATURE_TOKENS]
+    if len(tokens) < _SIGNATURE_MIN_TOKENS:
+        return frozenset()
+    return frozenset(tokens)
+
+
+def title_key(title: object) -> str:
+    """Lowercase words of a page title, with decorations removed."""
+    text = re.sub(r"^\s*\[[^\]]{1,12}\]\s*", "", str(title or "").lower())
+    return " ".join(re.findall(r"[a-z0-9]+", text))
+
+
+def same_title(first: str, second: str) -> bool:
+    """True when two pages carry the same article title.
+
+    The same paper is often served twice, as HTML and as PDF; the URLs and the
+    text differ, the title does not. One title is frequently truncated ("..."),
+    so a prefix of the other counts as the same title. Short titles are ignored:
+    "Home" or "Blog" says nothing about which page it is.
+    """
+    if not first or not second:
+        return False
+    shorter, longer = sorted((first, second), key=len)
+    if len(shorter) < 30:
+        return False
+    return shorter == longer or longer.startswith(shorter)
+
+
+def same_article(first: frozenset, second: frozenset) -> bool:
+    """True when two signatures are mostly the same words.
+
+    Containment rather than Jaccard: a syndicated copy adds its own chrome,
+    which inflates the union without making the article different. The shared
+    words must cover nearly all of the smaller page.
+    """
+    if not first or not second:
+        return False
+    return len(first & second) / min(len(first), len(second)) >= _SIGNATURE_OVERLAP
+
+
+def duplicate_of(result, existing: Iterable):
+    """The earlier result *result* repeats, if any.
+
+    Compares, in order of cost: the canonical URL, the opening text, the
+    article title, then the words of the whole page.
+    """
+    canonical = canonical_url(getattr(result, "url", ""))
+    fingerprint = content_fingerprint(result)
+    title = title_key(getattr(result, "title", ""))
+    signature = content_signature(result)
+    for other in existing:
+        if canonical and canonical == canonical_url(getattr(other, "url", "")):
+            return other
+        if fingerprint and fingerprint == content_fingerprint(other):
+            return other
+        if same_title(title, title_key(getattr(other, "title", ""))):
+            return other
+        if same_article(signature, content_signature(other)):
+            return other
+    return None
 
 
 def _is_low_value_url(canonical: str) -> bool:
@@ -339,6 +419,7 @@ def prepare_results(results: Iterable) -> Tuple[List, List[Tuple[object, str]]]:
     rejected: List[Tuple[object, str]] = []
     by_url: Dict[str, object] = {}
     by_fingerprint: Dict[str, object] = {}
+    signatures: List[Tuple[frozenset, object]] = []
 
     for result in results:
         canonical = canonical_url(getattr(result, "url", ""))
@@ -361,12 +442,32 @@ def prepare_results(results: Iterable) -> Tuple[List, List[Tuple[object, str]]]:
             rejected.append((result, "duplicate article text"))
             continue
 
+        signature = content_signature(result)
+        original = next(
+            (other for other_signature, other in signatures
+             if same_article(signature, other_signature)),
+            None,
+        )
+        if original is None:
+            original = next(
+                (other for other in kept
+                 if same_title(title_key(result.title),
+                               title_key(getattr(other, "title", "")))),
+                None,
+            )
+        if original is not None:
+            merge_result(original, result)
+            rejected.append((result, "near-duplicate article text"))
+            continue
+
         if hasattr(result, "quality"):
             result.quality = quality_score(result)
         kept.append(result)
         by_url[canonical] = result
         if fingerprint:
             by_fingerprint[fingerprint] = result
+        if signature:
+            signatures.append((signature, result))
 
     return kept, rejected
 
@@ -394,7 +495,7 @@ def build_source_registry(results: Iterable) -> Tuple[Dict[str, int], List[Sourc
     """
     numbers: Dict[str, int] = {}
     entries: List[SourceEntry] = []
-    seen_content: Set[str] = set()
+    accepted: List = []
 
     for result in results:
         canonical = canonical_url(getattr(result, "url", ""))
@@ -402,14 +503,14 @@ def build_source_registry(results: Iterable) -> Tuple[Dict[str, int], List[Sourc
             continue
         if not is_usable_result(result):
             continue
-        fingerprint = content_fingerprint(result)
-        if fingerprint and fingerprint in seen_content:
+        # The same page can be reached twice, republished, or served both as
+        # HTML and as PDF. One bibliography entry is enough.
+        if duplicate_of(result, accepted) is not None:
             continue
+        accepted.append(result)
 
         number = len(entries) + 1
         numbers[canonical] = number
-        if fingerprint:
-            seen_content.add(fingerprint)
 
         title = str(getattr(result, "title", None) or "").strip() or _domain(canonical)
         entries.append(SourceEntry(
@@ -477,6 +578,9 @@ def normalize_citations(
         return "".join(f"[Source {number}]" for number in numbers)
 
     cleaned = _CITATION_RE.sub(replace, text)
+    # "[Source 1], [Source 2]" is two markers with a comma in between; the
+    # canonical form puts them next to each other.
+    cleaned = re.sub(r"\]\s*,\s*(?=\[Source )", "]", cleaned)
     # Removing an invalid marker can leave a space before punctuation.
     cleaned = re.sub(r"[ \t]+([.,;:!?])", r"\1", cleaned)
     return re.sub(r"[ \t]{2,}", " ", cleaned)

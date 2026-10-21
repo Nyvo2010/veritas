@@ -244,7 +244,7 @@ class _FakeLLM:
 
     def generate_section_async(self, *, section_title, theme_description,
                                relevant_findings, main_query, style,
-                               evidence_sources=None):
+                               evidence_sources=None, other_sections=None):
         self.requested.append(section_title)
 
         async def run():
@@ -319,6 +319,27 @@ class SectionOrderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([s.title for s in sections], ["Section 1"])
 
+    async def test_two_findings_for_one_question_get_distinct_headings(self):
+        state = make_state()
+        state.add_question(SubQuestion(id="q1", question="How does quantization work?"))
+        for i in range(2):
+            state.findings.append(KnowledgeFinding(
+                content=f"f{i}", sources=[], confidence=0.9, question_id="q1"
+            ))
+        agent = ReportGeneratorAgent(_FakeLLM({
+            "How does quantization work?": 0,
+            "How does quantization work? (2)": 0,
+        }))
+
+        sections, _ = await agent._generate_sections_parallel(
+            state, {"themes": []}, "comprehensive"
+        )
+
+        self.assertEqual(
+            [s.title for s in sections],
+            ["How does quantization work?", "How does quantization work? (2)"],
+        )
+
     async def test_a_failed_section_is_counted_but_keeps_its_slot(self):
         themes = [
             {"title": "Alpha", "related_findings": [0]},
@@ -344,6 +365,157 @@ class SectionOrderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed, 1)
         self.assertEqual([s.title for s in sections], ["Alpha", "Beta"])
         self.assertIn("failed", sections[0].content.lower())
+
+
+class _PromptLLM(LLMClient):
+    """Captures the prompt the section writer would send."""
+
+    def __init__(self):
+        self.model = "stub-model"
+        self.fallback_model = ""
+        self.using_fallback = False
+        self._rate_limit_delay = 0.0
+        self._last_api_call = 0.0
+        self._sync_lock = threading.Lock()
+        self.messages = None
+
+    def _chat_completion(self, messages, **kwargs):
+        self.messages = messages
+        return "body"
+
+
+class SectionPromptTests(unittest.TestCase):
+    def _prompt(self, **kwargs):
+        llm = _PromptLLM()
+        llm.generate_section(
+            "Alpha", "what Alpha covers",
+            [{"content": "a claim", "confidence": 0.8, "source_numbers": [2]}],
+            "the main query", **kwargs,
+        )
+        system, user = llm.messages[0]["content"], llm.messages[1]["content"]
+        return system + "\n" + user
+
+    def test_other_section_headings_are_named_in_the_prompt(self):
+        prompt = self._prompt(other_sections=["Beta", "Gamma"])
+        self.assertIn("Beta", prompt)
+        self.assertIn("Gamma", prompt)
+
+    def test_the_prompt_requires_a_citation_in_every_subsection(self):
+        self.assertIn("every subsection needs at least one sentence", self._prompt())
+
+    def test_the_prompt_gives_the_report_wide_source_number(self):
+        self.assertIn("[Source 2]", self._prompt())
+
+
+class ThemeGroupingTests(unittest.IsolatedAsyncioTestCase):
+    """Findings that make the same point share one section.
+
+    Writing a section per finding repeated the same argument whenever two
+    findings described one mechanism in different words.
+    """
+
+    def _state(self, count):
+        state = make_state("How does quantization affect accuracy?")
+        for i in range(count):
+            state.findings.append(KnowledgeFinding(
+                content=f"finding {i}", sources=[], confidence=0.9,
+                question_id=f"q{i}",
+            ))
+        return state
+
+    async def test_one_theme_covering_two_findings_writes_one_section(self):
+        llm = _ReportPipelineLLM()
+        themes = {"themes": [{
+            "title": "Perplexity as a proxy",
+            "description": "how the proxy tracks quality",
+            "related_finding_ids": ["F1", "F2"],
+        }]}
+
+        sections, failed = await ReportGeneratorAgent(llm)._generate_sections_parallel(
+            self._state(2), themes, "comprehensive"
+        )
+
+        self.assertEqual(failed, 0)
+        self.assertEqual([s.title for s in sections], ["Perplexity as a proxy"])
+        self.assertEqual([f["content"] for f in llm.seen_findings],
+                         ["finding 0", "finding 1"])
+
+    async def test_a_finding_no_theme_names_keeps_its_own_section(self):
+        llm = _ReportPipelineLLM()
+        themes = {"themes": [{
+            "title": "Alpha", "related_finding_ids": ["F1"],
+        }]}
+
+        sections, _ = await ReportGeneratorAgent(llm)._generate_sections_parallel(
+            self._state(2), themes, "comprehensive"
+        )
+
+        self.assertEqual(len(sections), 2)
+        self.assertEqual(sections[0].title, "Alpha")
+
+    async def test_a_theme_naming_one_finding_twice_is_still_one_section(self):
+        llm = _ReportPipelineLLM()
+        themes = {"themes": [{
+            "title": "Alpha", "related_finding_ids": ["F1", "F1", "f1"],
+        }]}
+
+        sections, _ = await ReportGeneratorAgent(llm)._generate_sections_parallel(
+            self._state(1), themes, "comprehensive"
+        )
+
+        self.assertEqual(len(sections), 1)
+        self.assertEqual(len(llm.seen_findings), 1)
+
+    async def test_a_group_larger_than_three_findings_is_split(self):
+        llm = _ReportPipelineLLM()
+        themes = {"themes": [{
+            "title": "One theme",
+            "related_finding_ids": ["F1", "F2", "F3", "F4"],
+        }]}
+
+        sections, _ = await ReportGeneratorAgent(llm)._generate_sections_parallel(
+            self._state(4), themes, "comprehensive"
+        )
+
+        self.assertEqual(len(sections), 2)
+        self.assertEqual(len({s.title for s in sections}), 2)
+
+
+class SectionScopeTests(unittest.IsolatedAsyncioTestCase):
+    """Each section is told what its neighbours cover, so it does not repeat them."""
+
+    async def test_each_section_receives_the_other_headings(self):
+        state = make_state()
+        for i in range(2):
+            state.findings.append(KnowledgeFinding(
+                content=f"f{i}", sources=[], confidence=0.9, question_id=f"q{i}"
+            ))
+        llm = _ReportPipelineLLM()
+        themes = {"themes": [
+            {"title": "Alpha", "related_finding_ids": ["F1"]},
+            {"title": "Beta", "related_finding_ids": ["F2"]},
+        ]}
+
+        await ReportGeneratorAgent(llm)._generate_sections_parallel(
+            state, themes, "comprehensive"
+        )
+
+        self.assertEqual(llm.other_by_section["Alpha"], ["Beta"])
+        self.assertEqual(llm.other_by_section["Beta"], ["Alpha"])
+
+    async def test_a_single_section_has_no_neighbours_to_avoid(self):
+        state = make_state()
+        state.findings.append(KnowledgeFinding(
+            content="only", sources=[], confidence=0.9, question_id="q1"
+        ))
+        llm = _ReportPipelineLLM()
+
+        await ReportGeneratorAgent(llm)._generate_sections_parallel(
+            state, {"themes": [{"title": "Alpha", "related_finding_ids": ["F1"]}]},
+            "comprehensive",
+        )
+
+        self.assertEqual(llm.other_by_section["Alpha"], [])
 
 
 class MetaAnalysisRenderingTests(unittest.TestCase):
@@ -393,6 +565,8 @@ class _ReportPipelineLLM:
 
     def __init__(self):
         self.seen_findings = None
+        self.other_sections = None
+        self.other_by_section = {}
 
     def identify_report_themes(self, findings):
         return {"themes": [
@@ -401,7 +575,9 @@ class _ReportPipelineLLM:
 
     def generate_section_async(self, *, section_title, theme_description,
                                relevant_findings, main_query, style,
-                               evidence_sources=None):
+                               evidence_sources=None, other_sections=None):
+        self.other_sections = other_sections
+        self.other_by_section[section_title] = other_sections
         self.seen_findings = relevant_findings
         self.seen_evidence = evidence_sources
 
@@ -559,7 +735,7 @@ class _SyncSectionLLM(LLMClient):
 
     def _generate_section_sync(self, section_title, theme_description,
                                relevant_findings, main_query, style="comprehensive",
-                               evidence_sources=None):
+                               evidence_sources=None, other_sections=None):
         self.seen.append((section_title, threading.current_thread().name))
         return f"BODY:{section_title}"
 

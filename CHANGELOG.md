@@ -2,6 +2,37 @@
 
 Notable changes per release. This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.0.4] - 2026-10-21
+
+- One analysis pass can now produce several findings, one per distinct point
+  in the answer, instead of collapsing a question into a single finding. A
+  two-iteration run that used to yield two sections now writes four to six,
+  each about a different mechanism. Replies that ignore the new `findings`
+  array still work as before; points that restate each other are stored once.
+- Findings that make the same point share one section. The theme pass may now
+  group findings, so a report no longer carries two sections on perplexity
+  written from two different questions, and a group larger than three findings
+  is split rather than becoming a second executive summary.
+- Each section is told the other sections' headings, and every subsection is
+  required to carry a citation, so neighbours stop re-arguing the same point
+  and a paragraph of plausible uncited prose is not written at all.
+- Questions are deduplicated before they are queued: decomposition and
+  follow-ups that paraphrase a queued question are dropped instead of being
+  researched and written up twice.
+- The same page is one source even when it is republished elsewhere or served
+  as both HTML and PDF. Duplicate detection now compares canonical URLs, the
+  opening text, the article title, and the words of the whole page, so the
+  bibliography no longer lists one paper twice (arXiv HTML and ACL PDF).
+- Prompt sizes are bounded: theme analysis reads at most 40 findings and 500
+  characters each, cross-reference at most 30 — a run with more findings can
+  no longer grow those prompts without limit.
+- `[Source 1], [Source 2]` is normalised to `[Source 1][Source 2]`.
+- New offline end-to-end report test drives the real orchestrator, synthesis
+  and report generator with a stubbed model, then asserts the structural
+  contract: every citation resolves, the bibliography is contiguous, headings
+  are unique, no placeholder text survives, and the summary cites only what
+  the body cited. It runs in CI with the rest of the suite (179 tests).
+
 ## [1.0.3] - 2026-10-20
 
 - Report themes point at findings by id instead of by position, so a theme title

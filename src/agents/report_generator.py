@@ -32,6 +32,10 @@ log = logging.getLogger("veritas.report")
 # dropped and the report is still assembled from the rest.
 SECTION_TIMEOUT = 420.0
 
+# Findings that share a theme become one section; past three the section stops
+# having a single argument and repeats the executive summary.
+MAX_FINDINGS_PER_SECTION = 3
+
 
 SECTION_TIMEOUT_PLACEHOLDER = "[Section generation timed out after {seconds:.0f}s]"
 
@@ -186,13 +190,14 @@ class ReportGeneratorAgent:
         if not isinstance(theme_list, list):
             theme_list = []
 
-        # Themes used to reuse findings, which turned three answers into seven
-        # sections citing the same sources over and over. One section per
-        # finding keeps each section's evidence its own; the themes only supply
-        # a title and a focus for the finding they mention first.
-        titles = {}
-        descriptions = {}
+        # A theme names the findings that make the same point. Writing one
+        # section per finding repeated that point in several sections — the
+        # model writes "perplexity is the proxy metric" three ways. A theme
+        # covering two findings becomes one section built from both; a finding
+        # no theme names keeps a section of its own.
         by_id = {f"F{index + 1}": index for index in range(len(state.findings))}
+        groups = []
+        assigned = set()
         for theme in theme_list:
             if not isinstance(theme, dict):
                 continue
@@ -203,15 +208,26 @@ class ReportGeneratorAgent:
             if isinstance(ids, list):
                 for value in ids:
                     key = str(value).strip().upper()
-                    if key in by_id:
-                        indices.append(by_id[key])
+                    index = by_id.get(key)
+                    if index is not None and index not in indices \
+                            and index not in assigned:
+                        indices.append(index)
             raw_indices = theme.get("related_findings")
             if isinstance(raw_indices, list):
-                indices.extend(int(x) for x in raw_indices
-                               if str(x).isdigit() and 0 <= int(x) < len(state.findings))
-            for idx in indices:
-                titles.setdefault(idx, theme.get("title"))
-                descriptions.setdefault(idx, theme.get("description"))
+                for value in raw_indices:
+                    index = int(value) if str(value).isdigit() else -1
+                    if 0 <= index < len(state.findings) and index not in indices \
+                            and index not in assigned:
+                        indices.append(index)
+            if not indices:
+                continue
+            assigned.update(indices)
+            groups.append((theme.get("title"), theme.get("description"), indices))
+
+        for index in range(len(state.findings)):
+            if index not in assigned:
+                groups.append((None, None, [index]))
+        groups.sort(key=lambda group: min(group[2]))
 
         def finding_numbers(finding) -> list:
             """Report-wide numbers for a finding's supporting URLs."""
@@ -223,18 +239,49 @@ class ReportGeneratorAgent:
             return numbers
 
         used_titles = set()
-        for i, finding in enumerate(state.findings):
-            question = (
-                state.get_question_by_id(finding.question_id)
-                if finding.question_id else None
-            )
-            fallback_title = question.question if question else f"Section {i + 1}"
-            title = titles.get(i) or fallback_title
-            if title in used_titles:
-                title = fallback_title
+
+        def unique_title(preferred, fallback: str) -> str:
+            """A heading no other section uses.
+
+            Several findings can belong to the same question, and a theme
+            reply may name one finding twice. Falling back to the question
+            title alone then produced two sections with the same heading, so
+            the question is the second choice and a number is the last.
+            """
+            for candidate in (preferred, fallback):
+                if candidate and candidate not in used_titles:
+                    used_titles.add(candidate)
+                    return candidate
+            base = preferred or fallback
+            suffix = 2
+            while f"{base} ({suffix})" in used_titles:
+                suffix += 1
+            title = f"{base} ({suffix})"
             used_titles.add(title)
-            description = descriptions.get(i) or title
-            mapped_findings = [finding]
+            return title
+
+        # Two passes: every section needs to know the other headings before
+        # any of them is written, or each one repeats what its neighbours say.
+        planned = []
+        for preferred, description, indices in groups:
+            # A section with more than three findings stops being an argument
+            # and becomes a second executive summary, so long groups split.
+            for start in range(0, len(indices), MAX_FINDINGS_PER_SECTION):
+                chunk = indices[start:start + MAX_FINDINGS_PER_SECTION]
+                finding = state.findings[chunk[0]]
+                question = (
+                    state.get_question_by_id(finding.question_id)
+                    if finding.question_id else None
+                )
+                fallback_title = (
+                    question.question if question else f"Section {chunk[0] + 1}"
+                )
+                title = unique_title(preferred, fallback_title)
+                planned.append((chunk, title, description or title))
+        all_titles = [title for _, title, _ in planned]
+
+        for i, (chunk, title, description) in enumerate(planned):
+            mapped_findings = [state.findings[index] for index in chunk]
 
             relevant_findings = [
                 {
@@ -274,6 +321,7 @@ class ReportGeneratorAgent:
                 main_query=state.main_query,
                 style=style,
                 evidence_sources=evidence_sources,
+                other_sections=[other for other in all_titles if other != title],
             )
             tasks.append((i, title, task, allowed_numbers, section_urls))
         
