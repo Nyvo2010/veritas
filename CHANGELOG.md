@@ -15,6 +15,9 @@ Notable changes per release. This project follows [Semantic Versioning](https://
 - The ACL Anthology, ACL, OpenReview, JMLR, NeurIPS, ICLR, AAAI and IJCAI
   hosts are classified as academic. A peer-reviewed ACL paper used to print as
   "Web page" and rank with the web prior.
+- The run screen leaves one blank row between the progress card and the
+  "Ctrl+C quits" hint, so the hint reads as navigation instead of as the
+  card's last line.
 - The run screen's three cards share one padding rule: a blank row above the
   title and below the last line, so no text touches the tinted edge. The
   progress bar gets a blank row of its own above and below, the blank line

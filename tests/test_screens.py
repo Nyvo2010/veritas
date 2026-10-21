@@ -155,6 +155,39 @@ class ScreenRenderTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(text_of(card[0]).strip(), "", "no padding above the title")
                 self.assertEqual(text_of(card[-1]).strip(), "", "no padding below the last line")
 
+    async def test_run_screen_separates_the_hint_from_the_progress_card(self):
+        """One blank row between the last card and "Ctrl+C quits …".
+
+        Without it the hint reads as the card's last line instead of as
+        navigation, and the busiest block on the screen has no bottom edge.
+        """
+
+        def prepare():
+            tui_app.state["query"] = "How do on-device NPUs change mobile AI?"
+            tui_app.log_sig.set(SAMPLE_LOG)
+            tui_app.prog_sig.set((5.0, 28, "Iteration 2/10"))
+
+        setup = await test_render(tui_app.App, {"width": 100, "height": 40})
+        try:
+            prepare()
+            tui_app.screen.set("run")
+            setup.render_frame()
+            frame = setup.capture_spans()
+        finally:
+            setup.destroy()
+
+        def text_of(line):
+            return "".join(span.text for span in line.spans)
+
+        hint_rows = [i for i, line in enumerate(frame.lines) if "Ctrl+C quits" in text_of(line)]
+        self.assertEqual(len(hint_rows), 1, "the quit hint should appear once")
+        above = frame.lines[hint_rows[0] - 1]
+        self.assertEqual(text_of(above).strip(), "", "no blank row above the quit hint")
+        self.assertFalse(
+            any(span.bg is not None and getattr(span.bg, "a", 0) > 0 for span in above.spans),
+            "the row above the hint must be page background, not the card",
+        )
+
     async def test_run_screen_keeps_its_height_as_events_arrive(self):
         def prepare():
             tui_app.state["query"] = "x"

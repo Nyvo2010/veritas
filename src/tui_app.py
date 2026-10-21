@@ -1085,6 +1085,10 @@ def screen_run() -> Box:
             Text(lambda: timing_line(), fg=TERTIARY),
             title_gap=False,
         ),
+        # The hint is navigation, not part of the progress block, and the card
+        # below it is the busiest one on the screen: one blank row keeps the
+        # two from reading as a single paragraph.
+        gap(),
         footer=hint("Ctrl+C quits — whatever is finished is saved"),
     )
 
@@ -1786,11 +1790,11 @@ def activity_rows() -> int:
     Fixed chrome: outer margin (1) + header card (padding 1, title, query,
     phase, padding 1 = 5) + gap (1) + activity card (padding 1, title, log,
     padding 1 = 3) + gap (1) + progress card (padding 1, title, blank, bar,
-    blank, status, clock, timing, padding 1 = 9) + hint (1) = 21 rows, so the
-    log takes the rest. The run screen drops the blank line under its card
-    labels to pay for the padding.
+    blank, status, clock, timing, padding 1 = 9) + gap (1) + hint (1) = 22
+    rows, so the log takes the rest. The run screen drops the blank line under
+    its card labels to pay for the padding.
     """
-    return max(2, term_height() - 21)
+    return max(2, term_height() - 22)
 
 
 _bar_frame = {"key": None, "parts": ("", "", "")}
