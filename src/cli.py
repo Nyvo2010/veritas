@@ -325,13 +325,13 @@ def start_research(console: Console, agent: DeepResearchAgent, settings: dict):
             break
         if choice == "all":
             for name in names:
-                agent.set_category_toggle(name, True, silent=True)
+                agent.set_category_toggle(name, True)
         elif choice == "none":
             for name in names:
-                agent.set_category_toggle(name, False, silent=True)
+                agent.set_category_toggle(name, False)
         elif choice.isdigit() and 1 <= int(choice) <= len(names):
             name = names[int(choice) - 1]
-            agent.set_category_toggle(name, not agent.category_toggles[name], silent=True)
+            agent.set_category_toggle(name, not agent.category_toggles[name])
 
     # Step 4: confirm
     clear_screen()

@@ -4,6 +4,17 @@ Notable changes per release. This project follows [Semantic Versioning](https://
 
 ## Unreleased
 
+- Cleanup pass, no behaviour change. Removed state nothing read (the unused
+  `silent` argument on `set_category_toggle`, `ResearchGap.suggested_searches`
+  — always empty, `QueueUI.done_ok`, `LLMClient.using_fallback`), and the
+  `_seconds` wrapper, which was `theme.format_duration` plus a rounding
+  difference at 59.5s.
+- One source for the UI vocabulary: both frontends take log glyphs from
+  `ui/theme.py`, and a legacy `add_message(text, style)` call maps to a level
+  through one shared `level_for_style`, so a message cannot render red in one
+  frontend and plain in the other. Section progress lines now reach the file
+  log like every other report line.
+
 - The citation support check is given the whole sentence a marker belongs to.
   Sentence starts were found by taking everything after the last full stop,
   which lands inside `0.01%`, `e.g.` and `et al.`, so the checker was asked to

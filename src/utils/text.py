@@ -154,3 +154,22 @@ def classify_message(message: str) -> str:
     if "completed:" in lowered or "saved" in lowered or "found" in lowered:
         return "ok"
     return "info"
+
+
+# The Rich style names legacy call sites passed to add_message().
+_ERROR_STYLES = frozenset({"red", "bold red", "red bold"})
+_WARN_STYLES = frozenset({"yellow", "dim yellow"})
+
+
+def level_for_style(message: str, style: str = "white") -> str:
+    """Log level for a legacy ``add_message(text, style)`` call.
+
+    The wording is a guess; the style is the caller's own hint and wins when
+    it names a severity. Both UI sinks go through this, so one legacy call
+    cannot render red in one frontend and plain in the other.
+    """
+    if style in _ERROR_STYLES:
+        return "err"
+    if style in _WARN_STYLES:
+        return "warn"
+    return classify_message(message)

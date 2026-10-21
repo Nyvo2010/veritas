@@ -12,6 +12,8 @@ import logging
 import re
 import time
 from collections import Counter
+from datetime import datetime
+from functools import partial
 from typing import List, Dict
 
 from models.research_state import QuestionStatus, ResearchState, ReportSection
@@ -35,6 +37,7 @@ log = logging.getLogger("veritas.report")
 # One section may not hold the whole report hostage: a section that stalls is
 # dropped and the report is still assembled from the rest.
 SECTION_TIMEOUT = 420.0
+SECTION_TIMEOUT_PLACEHOLDER = "[Section generation timed out after {seconds:.0f}s]"
 
 # Findings that share a theme become one section; past three the section stops
 # having a single argument and repeats the executive summary.
@@ -267,7 +270,19 @@ _EXCERPT_STOPWORDS = frozenset(
     """.split()
 )
 
-SECTION_TIMEOUT_PLACEHOLDER = "[Section generation timed out after {seconds:.0f}s]"
+
+def _note(ui, level: str, message: str) -> None:
+    """One leveled line to the UI, plus the same line to the file log.
+
+    ``ui`` is any sink: a renderer with ``log(level, text)``, or a legacy one
+    that only knows ``add_message``.
+    """
+    log.debug("report[%s] %s", level, message)
+    log_method = getattr(ui, "log", None)
+    if callable(log_method):
+        log_method(level, message)
+    elif ui is not None:
+        ui.add_message(message, style="white")
 
 
 def _select_excerpt(text: str, focus: str, chars: int = 900) -> str:
@@ -351,14 +366,7 @@ class ReportGeneratorAgent:
         if ui_manager is not None and callable(getattr(ui_manager, "advance", None)):
             advance = ui_manager.advance
 
-        def note(level: str, message: str) -> None:
-            """One leveled line to the UI, plus the same line to the file log."""
-            log.debug("report[%s] %s", level, message)
-            log_method = getattr(ui_manager, "log", None)
-            if callable(log_method):
-                log_method(level, message)
-            elif ui_manager is not None:
-                ui_manager.add_message(message, style="white")
+        note = partial(_note, ui_manager)
 
         started = time.perf_counter()
         # One registry for the whole document: the same number labels evidence
@@ -683,12 +691,7 @@ class ReportGeneratorAgent:
         sections = []
         semaphore = asyncio.Semaphore(MAX_PARALLEL_SECTIONS)
 
-        def note(level: str, message: str) -> None:
-            log_method = getattr(ui_manager, "log", None)
-            if callable(log_method):
-                log_method(level, message)
-            elif ui_manager is not None:
-                ui_manager.add_message(message, style="white")
+        note = partial(_note, ui_manager)
 
         async def generate_with_progress(
             order, title, task, section_numbers, section_urls, evidence_sources
@@ -787,7 +790,8 @@ class ReportGeneratorAgent:
         ``allowed_numbers`` is what the sections cited; ``registry`` maps URLs
         to report-wide numbers so each finding can say where it came from.
         """
-        # Full-enough findings for a 600-900 word summary. The source numbers
+        # Full-enough findings for the summary target (see the caller, which
+        # sizes it between 250 and 450 words). The source numbers
         # travel with them, or the summary has nothing to cite.
         key_findings = []
         for finding in sorted(state.findings, key=lambda x: x.confidence, reverse=True)[:10]:
@@ -1161,11 +1165,9 @@ class ReportGeneratorAgent:
         gaps_section: str,
         source_entries: list = None,
         cross_reference_section: str = "",
-        citation_audit: tuple = None,
+        citation_audit: Dict = None,
     ) -> str:
         """Assemble the components as one properly structured Markdown file."""
-        from datetime import datetime
-
         model = getattr(self.llm, "model", "") or "unknown"
         generated = datetime.now().strftime("%Y-%m-%d %H:%M")
         ordered_sections = sorted(sections, key=lambda section: section.order)
@@ -1197,13 +1199,11 @@ class ReportGeneratorAgent:
             meta_parts.append(answered_label)
         meta_parts.append(f"Sources: {len(cited)} cited of {reviewed} reviewed")
         meta_parts.append(f"Citations: {citation_count(body_for_count)}")
-        # Only when the check actually ran and examined something: an outage
-        # reports zero checked, so the header never implies an audit it did
-        # not perform. The summary is not part of this count.
         # One number per citation marker, and only when every section was
-        # actually audited: a partial audit summed into one line would claim
-        # more coverage than the run had. "section citations" is literal —
-        # the executive summary is not part of this check.
+        # actually audited and the check examined something: an outage reports
+        # zero checked, and a partial audit summed into one line would claim
+        # more coverage than the run had. "section citations" is literal — the
+        # executive summary is not part of this check.
         audit = citation_audit or {}
         checked = int(audit.get("checked") or 0)
         dropped = int(audit.get("dropped") or 0)

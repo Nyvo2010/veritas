@@ -187,7 +187,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow,
 ## Roadmap
 
 - an npm wrapper so `npx veritas` works for people without Python
-- test coverage beyond the UI primitives
 
 ## License
 

@@ -23,7 +23,7 @@ import threading
 import time
 
 from ui.timings import Timings
-from utils.text import classify_message, strip_markup
+from utils.text import level_for_style, strip_markup
 
 
 class QueueUI:
@@ -38,7 +38,6 @@ class QueueUI:
         self.total_steps = 1
         self.completed_steps = 0.0
         self.start_time = time.time()
-        self.done_ok = None
         self.counts = (0, 0, 0)     # (questions answered, findings, sources)
         self.timings = Timings()
 
@@ -55,7 +54,6 @@ class QueueUI:
             self.total_steps = max(1, int(total_steps))
             self.completed_steps = 0.0
             self.start_time = time.time()
-            self.done_ok = None
             self.counts = (0, 0, 0)
 
     def start(self) -> None:
@@ -67,7 +65,6 @@ class QueueUI:
     def complete(self) -> None:
         with self._lock:
             self.completed_steps = float(self.total_steps)
-            self.done_ok = True
         self.events.put(("done", True))
 
     # -- progress --------------------------------------------------------
@@ -141,9 +138,4 @@ class QueueUI:
         cleaned = strip_markup(str(message))
         if not cleaned or cleaned.lower() in {"done", "done!"}:
             return
-        level = classify_message(cleaned)
-        if style in ("red bold", "red", "bold red"):
-            level = "err"
-        elif style in ("yellow", "dim yellow"):
-            level = "warn"
-        self.log(level, cleaned)
+        self.log(level_for_style(cleaned, style), cleaned)

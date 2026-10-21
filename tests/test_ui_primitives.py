@@ -20,6 +20,8 @@ from ui.live_renderer import LiveRenderer  # noqa: E402
 from ui.timings import Timings  # noqa: E402
 from utils import text  # noqa: E402
 from utils import llm_client  # noqa: E402
+from utils.ui_manager import UIManager  # noqa: E402
+from runner_ui import QueueUI  # noqa: E402
 
 BRAILLE_BLOCK = 0x2800
 
@@ -201,6 +203,33 @@ class TextHelperTests(unittest.TestCase):
         }
         for message, expected in cases.items():
             self.assertEqual(text.classify_message(message), expected, message)
+
+    def test_a_legacy_style_names_the_level(self):
+        """Both UI sinks map add_message styles the same way.
+
+        The style is the call site's own hint, so it wins over the wording:
+        "Section complete" in red is an error, whatever the words suggest.
+        """
+        self.assertEqual(text.level_for_style("Section complete", "red"), "err")
+        self.assertEqual(text.level_for_style("Section complete", "bold red"), "err")
+        self.assertEqual(text.level_for_style("Section complete", "yellow"), "warn")
+        self.assertEqual(text.level_for_style("Completed: theme one", "white"), "ok")
+        self.assertEqual(text.level_for_style("Error: boom", "white"), "err")
+
+    def test_both_sinks_publish_the_same_level_for_one_legacy_call(self):
+        console = Console(width=80, record=True, file=io.StringIO(), force_terminal=False)
+        from_rich: list = []
+        sink = UIManager(console=console)
+        sink.renderer.log = lambda level, message: from_rich.append(level)
+        sink.add_message("Section complete", style="red")
+
+        from_queue: list = []
+        queue_sink = QueueUI()
+        queue_sink.log = lambda level, message: from_queue.append(level)
+        queue_sink.add_message("Section complete", style="red")
+
+        self.assertEqual(from_rich, ["err"])
+        self.assertEqual(from_queue, ["err"])
 
 
 class LiveRendererLayoutTests(unittest.TestCase):

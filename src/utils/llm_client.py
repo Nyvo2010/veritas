@@ -320,7 +320,6 @@ class LLMClient:
         self.fallback_model = (default_fallback or "").strip()
         if self.fallback_model == self.model:
             self.fallback_model = ""
-        self.using_fallback = False
         self.max_retries = MAX_RETRIES
         self.retry_delay = RETRY_DELAY
         self._last_api_call = 0  # Track last API call time for rate limiting
@@ -381,7 +380,6 @@ class LLMClient:
                 self.model, self.max_retries, exc, fallback,
             )
             self.model = fallback
-            self.using_fallback = True
             return call(*args, **kwargs)
 
     def _handle_rate_limit_sync(self, attempt: int) -> bool:

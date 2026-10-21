@@ -78,14 +78,17 @@ DANGER = theme.DANGER
 WARNING = theme.WARNING
 INFO = theme.INFO
 
+# Same glyphs the Rich frontend draws, from the one place that defines them:
+# a level that looks like a bullet here and a plus there reads as two kinds of
+# event.
 LOG_GLYPH = {
-    "phase": "*",
-    "search": ">",
-    "insight": "-",
-    "ok": "+",
-    "warn": "!",
-    "err": "x",
-    "info": "·",
+    "phase": theme.GLYPH_PHASE,
+    "search": theme.GLYPH_SEARCH,
+    "insight": theme.GLYPH_INSIGHT,
+    "ok": theme.GLYPH_OK,
+    "warn": theme.GLYPH_WARN,
+    "err": theme.GLYPH_ERR,
+    "info": theme.GLYPH_INFO,
 }
 
 LOG_LIMIT = 300             # log lines kept in memory for a run

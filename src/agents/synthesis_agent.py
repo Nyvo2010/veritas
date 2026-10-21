@@ -141,7 +141,6 @@ class SynthesisAgent:
                 description=gap_desc,
                 question_id=question.id,
                 severity="moderate",
-                suggested_searches=[]
             )
             state.gaps.append(gap)
         
